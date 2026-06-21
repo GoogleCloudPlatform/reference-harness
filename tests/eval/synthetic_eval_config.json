@@ -1,0 +1,26 @@
+{
+  "criteria": {
+    "hallucinations_v1": {
+      "threshold": 0.7,
+      "judge_model_options": {
+        "judge_model": "gemini-3-flash-preview",
+        "num_samples": 1
+      }
+    },
+    "rubric_based_final_response_quality_v1": {
+      "threshold": 0.6,
+      "judge_model_options": {
+        "judge_model": "gemini-3-flash-preview",
+        "num_samples": 1
+      },
+      "rubrics": [
+        {
+          "rubric_id": "finds_target_skill_vuln",
+          "rubric_content": {
+            "text_property": "The user prompt names a target directory eval-corpora/synthetic/<SKILL>/ where <SKILL> identifies one specific vulnerability class (e.g. csrf, idor, ssrf, xss, sql-or-nosql-injection, eval-or-function-injection, weak-crypto-or-password-storage, hardcoded-secrets, unvalidated-redirects, commented-security-middleware, broken-authorization). The agent's final report must identify a vulnerability of exactly that class in the target's vuln.js file. Generic 'this code has security issues' notes without naming the specific class do NOT satisfy this rubric."
+          }
+        }
+      ]
+    }
+  }
+}

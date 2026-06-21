@@ -1,0 +1,51 @@
+{
+  "eval_set_id": "vulncatcher_nodegoat",
+  "name": "VulnCatcher vs OWASP NodeGoat",
+  "description": "End-to-end scan of OWASP NodeGoat. Measures whether VulnCatcher's discovery -> triage -> validation -> report pipeline surfaces the documented vulnerability categories (injection, XSS, weak crypto, broken access control, misconfig/secrets) and whether the report is actionable. Requires NodeGoat cloned to eval-fixtures/nodegoat at the project root (see tests/eval/RESULTS.md for setup). Run from the repo root.",
+  "eval_cases": [
+    {
+      "eval_id": "nodegoat_full_scan",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-fixtures/nodegoat for vulnerabilities and write a report."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "detect_languages",
+                "args": { "target_path": "eval-fixtures/nodegoat" }
+              },
+              {
+                "name": "run_semgrep",
+                "args": { "target_path": "eval-fixtures/nodegoat" }
+              },
+              {
+                "name": "run_trivy",
+                "args": { "target_path": "eval-fixtures/nodegoat" }
+              },
+              {
+                "name": "run_gitleaks",
+                "args": { "target_path": "eval-fixtures/nodegoat" }
+              },
+              {
+                "name": "write_report",
+                "args": {}
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    }
+  ]
+}

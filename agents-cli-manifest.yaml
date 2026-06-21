@@ -1,0 +1,13 @@
+name: vulncatcher
+description: Simple ReAct agent
+base_template: adk
+agent_directory: app
+generated_at: "2026-05-14T18:16:30.259605+00:00"
+acli_version: 0.2.0
+create_params:
+  deployment_target: none
+  session_type: in_memory
+  cicd_runner: skip
+  include_data_ingestion: false
+  datastore: none
+  agent_guidance_filename: CLAUDE.md

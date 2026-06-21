@@ -1,0 +1,19 @@
+{
+  "name": "vulcatcher-api-deploy",
+  "version": "1.0.0",
+  "description": "A GCP deployment utility for VulnCatcher",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "config": {
+    "tf_version": "1.15.5"
+  },
+  "author": "woodwardb@google.com",
+  "license": "ISC",
+  "dependencies": {
+    "@c6fc/spellcraft": "^0.2.0",
+    "@c6fc/spellcraft-gcp-auth": "^1.1.0",
+    "@c6fc/spellcraft-gcp-terraform": "^1.1.0"
+  }
+}

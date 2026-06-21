@@ -1,0 +1,14 @@
+# CODEOWNERS for VulnCatcher
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customizations/about-code-owners
+#
+# Primary maintainer: @tarunsharmaa-cyber
+# Originator / agent-harness co-owner: @amc3777
+#
+# Default: Tarun owns everything.
+* @tarunsharmaa-cyber
+
+# Agent harness, detection/validation skills, and evaluation infrastructure
+# are co-owned with the original author for continuity.
+/app/agent.py     @tarunsharmaa-cyber @amc3777
+/app/skills/      @tarunsharmaa-cyber @amc3777
+/tests/eval/      @tarunsharmaa-cyber @amc3777

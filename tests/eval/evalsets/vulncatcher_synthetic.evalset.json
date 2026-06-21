@@ -1,0 +1,227 @@
+{
+  "eval_set_id": "vulncatcher_synthetic",
+  "name": "VulnCatcher per-skill synthetic corpus",
+  "description": "One minimal one-vuln-per-file target per detection skill in app/skills/detection/. Each case scans a single subdir and is judged by the shared finds_target_skill_vuln rubric, which reads the target skill name from the user prompt's path and checks that the report identifies exactly that vuln class. Aggregate pass rate across the 11 cases = per-skill recall. Pairs with the NodeGoat evalset (aggregate end-to-end) — this one isolates per-skill correctness so regressions when modifying a skill are localized.",
+  "eval_cases": [
+    {
+      "eval_id": "skill_csrf",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/csrf/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_idor",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/idor/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_ssrf",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/ssrf/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_eval_or_function_injection",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/eval-or-function-injection/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_xss",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/xss/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_weak_crypto_or_password_storage",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/weak-crypto-or-password-storage/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_hardcoded_secrets",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/hardcoded-secrets/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_unvalidated_redirects",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/unvalidated-redirects/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_commented_security_middleware",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/commented-security-middleware/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_broken_authorization",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/broken-authorization/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "skill_sql_or_nosql_injection",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-corpora/synthetic/sql-or-nosql-injection/ for vulnerabilities and write a report."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "pricing_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+  "default_models": {
+    "pro": "gemini-3.1-pro",
+    "flash": "gemini-3.5-flash"
+  },
+  "models": {
+    "gemini-3.1-pro": {
+      "input_cost_per_token": 0.000002,
+      "output_cost_per_token": 0.000012
+    },
+    "gemini-3.5-flash": {
+      "input_cost_per_token": 0.0000015,
+      "output_cost_per_token": 0.000009
+    }
+  }
+}

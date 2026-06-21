@@ -1,0 +1,51 @@
+{
+  "eval_set_id": "vulncatcher_benchmark_java",
+  "name": "VulnCatcher vs OWASP Benchmark Java Subset",
+  "description": "Generalization testing on a Java subset. Measures whether VulnCatcher's sequential multi-agent pipeline successfully discovers, validates, and reports textbook Java SQL Injection and Path Traversal vulnerabilities without Java-specific playbooks. Run from the repo root.",
+  "eval_cases": [
+    {
+      "eval_id": "benchmark_java_subset_scan",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Scan eval-fixtures/benchmark-java for vulnerabilities and write a report."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "detect_languages",
+                "args": { "target_path": "eval-fixtures/benchmark-java" }
+              },
+              {
+                "name": "run_semgrep",
+                "args": { "target_path": "eval-fixtures/benchmark-java" }
+              },
+              {
+                "name": "run_trivy",
+                "args": { "target_path": "eval-fixtures/benchmark-java" }
+              },
+              {
+                "name": "run_gitleaks",
+                "args": { "target_path": "eval-fixtures/benchmark-java" }
+              },
+              {
+                "name": "write_report",
+                "args": {}
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "eval_user",
+        "state": {}
+      }
+    }
+  ]
+}

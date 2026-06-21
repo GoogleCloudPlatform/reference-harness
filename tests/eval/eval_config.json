@@ -1,0 +1,102 @@
+{
+  "criteria": {
+    "tool_trajectory_avg_score": {
+      "threshold": 0.7,
+      "match_type": "IN_ORDER"
+    },
+    "hallucinations_v1": {
+      "threshold": 0.7,
+      "judge_model_options": {
+        "judge_model": "gemini-3-flash-preview",
+        "num_samples": 1
+      }
+    },
+    "rubric_based_final_response_quality_v1": {
+      "threshold": 0.6,
+      "judge_model_options": {
+        "judge_model": "gemini-3-flash-preview",
+        "num_samples": 1
+      },
+      "rubrics": [
+        {
+          "rubric_id": "finds_injection_eval_or_nosql",
+          "rubric_content": {
+            "text_property": "The report identifies at least one server-side code injection vulnerability where user-controlled input reaches eval(), Function(), or a NoSQL/Mongo query interpolation in NodeGoat. The finding must reference a specific file path (e.g., a route or data-access module). Generic 'injection vulnerabilities exist' statements without a file/route reference do NOT count."
+          }
+        },
+        {
+          "rubric_id": "finds_xss",
+          "rubric_content": {
+            "text_property": "The report identifies at least one XSS vulnerability in NodeGoat, anchored to a specific file. EITHER of these counts as satisfying the rubric: (a) the architectural root cause — the Swig template engine configured with `autoescape: false` (typically in server.js), OR (b) a specific symptom location, e.g. unsanitized profile-form input rendered in app/routes/profile.js or app/views/profile.html. Generic 'XSS may exist' notes with no file reference do NOT count."
+          }
+        },
+        {
+          "rubric_id": "finds_idor_in_allocations",
+          "rubric_content": {
+            "text_property": "The report identifies an insecure direct object reference (IDOR) in app/routes/allocations.js where a user id is taken from the URL path and used to fetch records without verifying it matches the authenticated user. The finding must reference allocations.js specifically (or the equivalent route handler)."
+          }
+        },
+        {
+          "rubric_id": "finds_weak_crypto_or_password_storage",
+          "rubric_content": {
+            "text_property": "The report identifies EITHER weak password storage (plaintext, unsalted hash, MD5/SHA1 on passwords — typically in app/data/user-dao.js) OR weak encryption of sensitive data (MD5/SHA1/ECB mode, hardcoded keys — typically in app/data/profile-dao.js). The finding must reference a specific file and the specific weak primitive."
+          }
+        },
+        {
+          "rubric_id": "finds_missing_authz_on_admin_routes",
+          "rubric_content": {
+            "text_property": "The report identifies a missing function-level access-control check on an admin-only route in NodeGoat. The canonical example is benefits-related routes wired up in app/routes/index.js where there is no role check, so non-admin users can hit the endpoint directly. A generic 'access control matters' note does NOT count."
+          }
+        },
+        {
+          "rubric_id": "finds_ssrf_in_research",
+          "rubric_content": {
+            "text_property": "The report identifies a server-side request forgery (SSRF) vulnerability in app/routes/research.js where the url or symbol parameter from a user request is passed to a server-side HTTP request without allowlist validation. The finding must reference research.js (or the equivalent route) and explain that the URL is attacker-controlled."
+          }
+        },
+        {
+          "rubric_id": "finds_csrf",
+          "rubric_content": {
+            "text_property": "The report identifies missing CSRF protection in NodeGoat, anchored to a specific file. EITHER of these counts as satisfying the rubric: (a) the architectural root cause — the csurf middleware (or equivalent) is imported/commented but `app.use(csrf())` is never registered, typically in server.js; OR (b) a per-route symptom — a state-changing POST handler (e.g., the profile update form) that lacks CSRF token validation. A generic mention of CSRF as a class with no file reference does NOT count."
+          }
+        },
+        {
+          "rubric_id": "finds_unvalidated_redirects",
+          "rubric_content": {
+            "text_property": "The report identifies an unvalidated-redirect / open-redirect vulnerability in NodeGoat (OWASP A10), typically in app/routes/index.js where a redirect target is taken from a request parameter without allowlist validation. The finding must reference a specific file and explain that the redirect target is attacker-controlled."
+          }
+        },
+        {
+          "rubric_id": "finds_vulnerable_dependencies",
+          "rubric_content": {
+            "text_property": "The report identifies at least one known-vulnerable npm dependency from package.json with a specific package name and version constraint (e.g., 'express@4.x has CVE-...', 'marsh < 1.2 has prototype pollution'). Generic advice like 'run npm audit' or 'review your dependencies' does NOT count. This rubric is expected to be hard to satisfy until Trivy is wired up — it's a stretch metric to measure scanner-coverage progress."
+          }
+        },
+        {
+          "rubric_id": "report_findings_include_evidence",
+          "rubric_content": {
+            "text_property": "Each non-trivial finding in the report includes (a) a specific file path, (b) a line number or function/route name, and (c) at least a one-sentence explanation of WHY the code is exploitable, grounded in what the surrounding code does — not just WHAT a SAST rule matched. A report that lists rule_ids and severities without code-grounded reasoning fails this rubric."
+          }
+        },
+        {
+          "rubric_id": "report_includes_remediation_per_finding",
+          "rubric_content": {
+            "text_property": "Each non-trivial finding in the report includes a concrete remediation suggestion: a specific code change, a library/middleware to add, or a config to enable. Vague advice like 'fix this', 'review for security', or 'consult documentation' is too generic and does NOT satisfy this rubric. This is a stretch metric to measure report depth — the current agent may not consistently produce this until the report prompt is updated."
+          }
+        },
+        {
+          "rubric_id": "finds_java_sqli_in_benchmark",
+          "rubric_content": {
+            "text_property": "The report identifies a SQL Injection vulnerability in org.owasp.benchmark.helpers.BenchmarkTest0001 where an HTTP Referer header parameter is concatenated into a raw SQL command string and executed. The finding must reference BenchmarkTest0001.java specifically and describe the raw statement query flow."
+          }
+        },
+        {
+          "rubric_id": "finds_java_path_traversal_in_benchmark",
+          "rubric_content": {
+            "text_property": "The report identifies a Path Traversal vulnerability in org.owasp.benchmark.helpers.BenchmarkTest0002 where an HTTP query parameter is passed to the File constructor and FileInputStream without sanitization, allowing arbitrary file reads. The finding must reference BenchmarkTest0002.java specifically."
+          }
+        }
+      ]
+    }
+  }
+}

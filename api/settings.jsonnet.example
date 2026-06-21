@@ -1,0 +1,12 @@
+{
+    region: "us-central1",
+
+    # Add email addresses for API permitted users
+    permitted_users: [
+        "permitted-api-user-1@example.com",
+        "permitted-api-user-2@example.com"
+    ],
+
+    # The maximum amount of time a scan job can run before being terminated.
+    scan_job_max_duration_seconds: 86400
+}
