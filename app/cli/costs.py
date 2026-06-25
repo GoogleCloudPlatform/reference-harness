@@ -1,3 +1,19 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Cost calculation utilities."""
+
 import json
 import os
 import sqlite3
@@ -25,13 +41,16 @@ def calculate_session_token_costs(session_ids):
     flash_out_rate = 0.0
     pricing_source = "Local Baseline Config"
 
-    pricing_url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    pricing_url = (
+        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+        "model_prices_and_context_window.json"
+    )
     local_prices_path = str(
         Path(__file__).parent.parent / "app_utils" / "default_prices.json"
     )
     try:
         if os.path.exists(local_prices_path):
-            with open(local_prices_path) as f:
+            with open(local_prices_path, encoding="utf-8") as f:
                 data = json.load(f)
 
                 fallback_pro = fb_pro
@@ -57,7 +76,7 @@ def calculate_session_token_costs(session_ids):
                     "output_cost_per_token"
                 ]
                 pricing_url = data.get("pricing_url", pricing_url)
-    except Exception:
+    except (json.JSONDecodeError, KeyError, OSError, TypeError):
         pass
 
     try:
@@ -83,7 +102,7 @@ def calculate_session_token_costs(session_ids):
                     "output_cost_per_token", flash_out_rate
                 )
             pricing_source = "LiteLLM Live Catalog"
-    except Exception:
+    except (requests.RequestException, ValueError):
         pass
 
     pro_in = 0
@@ -94,10 +113,11 @@ def calculate_session_token_costs(session_ids):
     try:
         conn = sqlite3.connect(db_path)
         placeholders = ",".join("?" for _ in session_ids)
-        rows = conn.execute(
-            f"SELECT event_data FROM events WHERE session_id IN ({placeholders})",
-            tuple(session_ids),
-        ).fetchall()
+        query = (
+            "SELECT event_data FROM events WHERE "
+            f"session_id IN ({placeholders})"
+        )
+        rows = conn.execute(query, tuple(session_ids)).fetchall()
         conn.close()
 
         for row in rows:
@@ -119,9 +139,9 @@ def calculate_session_token_costs(session_ids):
                     else:
                         pro_in += in_tokens
                         pro_out += out_tokens
-            except Exception:
+            except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
                 pass
-    except Exception:
+    except sqlite3.Error:
         return None
 
     pro_cost = (pro_in * pro_in_rate) + (pro_out * pro_out_rate)
@@ -135,8 +155,11 @@ def calculate_session_token_costs(session_ids):
             discount_val = float(discount_env)
             if 0.0 < discount_val < 1.0:
                 total_cost = total_cost * (1.0 - discount_val)
-                discount_label = f" (Custom Enterprise Discount of {int(discount_val * 100)}% applied)"
-        except Exception:
+                discount_label = (
+                    " (Custom Enterprise Discount of "
+                    f"{int(discount_val * 100)}% applied)"
+                )
+        except ValueError:
             pass
 
     return {

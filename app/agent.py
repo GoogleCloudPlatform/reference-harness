@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ruff: noqa
-"""VulnCatcher root agent: SequentialAgent pipeline over discovery → triage → validation → report."""
+"""VulnCatcher root agent.
+
+SequentialAgent pipeline over discovery -> triage -> validation -> report.
+"""
 
 import os
 
@@ -20,13 +23,13 @@ try:
     import litellm
 
     litellm.suppress_debug_info = True
-except Exception:
+except (ImportError, AttributeError):
     pass
 
 import google.auth
 from google.adk.agents import Agent, ParallelAgent, SequentialAgent
 from google.adk.apps import App
-from google.adk.models import Gemini
+from google.adk.models import Gemini, LiteLlm
 from google.genai import types
 
 from .plugins import ScannerAllowlistPlugin
@@ -48,7 +51,7 @@ from .tools import (
     write_report,
 )
 
-# Resolve the GCP project ID dynamically from environment variables or standard ADC defaults!
+# Resolve GCP project ID dynamically from env vars or ADC defaults
 project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get(
     "VULNCATCHER_PROJECT"
 )
@@ -56,11 +59,12 @@ if not project_id:
     try:
         _, auth_project = google.auth.default()
         project_id = auth_project
-    except Exception:
+    except (google.auth.exceptions.DefaultCredentialsError, OSError):
         pass
 if not project_id:
     raise ValueError(
-        "Project ID could not be automatically determined. Please set GOOGLE_CLOUD_PROJECT explicitly!"
+        "Project ID could not be automatically determined. "
+        "Please set GOOGLE_CLOUD_PROJECT explicitly!"
     )
 
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
@@ -74,16 +78,17 @@ os.environ["VERTEXAI_LOCATION"] = os.environ.get(
 
 
 def _get_stripped_litellm():
-    from google.adk.models import LiteLlm
-
     class StrippedLiteLlm(LiteLlm):
+        """LiteLlm wrapper that strips unsupported temperature configs."""
+
         async def generate_content_async(self, llm_request, stream=False):
             try:
                 async for event in super().generate_content_async(
                     llm_request, stream
                 ):
                     yield event
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Catching Exception because LiteLLM errors vary
                 if (
                     "temperature" in str(exc).lower()
                     and llm_request
@@ -103,16 +108,17 @@ def _get_stripped_litellm():
 
 
 def _get_stripped_gemini():
-    from google.adk.models import Gemini
-
     class StrippedGemini(Gemini):
+        """Gemini wrapper that strips unsupported temperature configs."""
+
         async def generate_content_async(self, llm_request, stream=False):
             try:
                 async for event in super().generate_content_async(
                     llm_request, stream
                 ):
                     yield event
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Catching Exception because Gemini API errors vary
                 if (
                     "temperature" in str(exc).lower()
                     and llm_request
@@ -136,53 +142,50 @@ def _model():
     gemma_endpoint = os.environ.get("VULNCATCHER_GEMMA_ENDPOINT")
 
     if not model_name.startswith("gemini-"):
-        LiteLlm = _get_stripped_litellm()
+        litellm_cls = _get_stripped_litellm()
         if gemma_endpoint:
             litellm_model = (
                 model_name
                 if model_name.startswith("openai/")
                 else f"openai/{model_name}"
             )
-            return LiteLlm(
+            return litellm_cls(
                 model=litellm_model, api_base=gemma_endpoint, api_key="none"
             )
-        else:
-            return LiteLlm(model=model_name, drop_params=True)
+        return litellm_cls(model=model_name, drop_params=True)
 
     if gemma_endpoint:
-        LiteLlm = _get_stripped_litellm()
-        # Prepend openai/ if not present to route via LiteLlm OpenAI-compatible wrapper
+        litellm_cls = _get_stripped_litellm()
+        # Prepend openai/ if not present to route via LiteLlm wrapper
         litellm_model = (
             model_name
             if model_name.startswith("openai/")
             else f"openai/{model_name}"
         )
-        return LiteLlm(
+        return litellm_cls(
             model=litellm_model, api_base=gemma_endpoint, api_key="none"
         )
     client_kwargs = {}
     if not os.environ.get("GEMINI_API_KEY"):
-        import google.auth
-
         try:
-            _, project_id = google.auth.default()
-        except:
-            project_id = None
-        project_id = (
+            _, auth_proj = google.auth.default()
+        except (google.auth.exceptions.DefaultCredentialsError, OSError):
+            auth_proj = None
+        resolved_proj = (
             os.environ.get("GOOGLE_CLOUD_PROJECT")
             or os.environ.get("VULNCATCHER_PROJECT")
-            or project_id
+            or auth_proj
         )
         location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-        if project_id:
+        if resolved_proj:
             client_kwargs = {
                 "vertexai": True,
-                "project": project_id,
+                "project": resolved_proj,
                 "location": location,
             }
 
-    Gemini = _get_stripped_gemini()
-    return Gemini(
+    gemini_cls = _get_stripped_gemini()
+    return gemini_cls(
         model=model_name,
         retry_options=types.HttpRetryOptions(attempts=3),
         client_kwargs=client_kwargs,
@@ -194,52 +197,49 @@ def _model_fast():
     gemma_endpoint = os.environ.get("VULNCATCHER_GEMMA_ENDPOINT")
 
     if not model_name.startswith("gemini-"):
-        LiteLlm = _get_stripped_litellm()
+        litellm_cls = _get_stripped_litellm()
         if gemma_endpoint:
             litellm_model = (
                 model_name
                 if model_name.startswith("openai/")
                 else f"openai/{model_name}"
             )
-            return LiteLlm(
+            return litellm_cls(
                 model=litellm_model, api_base=gemma_endpoint, api_key="none"
             )
-        else:
-            return LiteLlm(model=model_name, drop_params=True)
+        return litellm_cls(model=model_name, drop_params=True)
 
     if gemma_endpoint:
-        LiteLlm = _get_stripped_litellm()
+        litellm_cls = _get_stripped_litellm()
         litellm_model = (
             model_name
             if model_name.startswith("openai/")
             else f"openai/{model_name}"
         )
-        return LiteLlm(
+        return litellm_cls(
             model=litellm_model, api_base=gemma_endpoint, api_key="none"
         )
     client_kwargs = {}
     if not os.environ.get("GEMINI_API_KEY"):
-        import google.auth
-
         try:
-            _, project_id = google.auth.default()
-        except:
-            project_id = None
-        project_id = (
+            _, auth_proj = google.auth.default()
+        except (google.auth.exceptions.DefaultCredentialsError, OSError):
+            auth_proj = None
+        resolved_proj = (
             os.environ.get("GOOGLE_CLOUD_PROJECT")
             or os.environ.get("VULNCATCHER_PROJECT")
-            or project_id
+            or auth_proj
         )
         location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-        if project_id:
+        if resolved_proj:
             client_kwargs = {
                 "vertexai": True,
-                "project": project_id,
+                "project": resolved_proj,
                 "location": location,
             }
 
-    Gemini = _get_stripped_gemini()
-    return Gemini(
+    gemini_cls = _get_stripped_gemini()
+    return gemini_cls(
         model=model_name,
         retry_options=types.HttpRetryOptions(attempts=3),
         client_kwargs=client_kwargs,
@@ -275,6 +275,8 @@ Output only the JSON object — no prose, no Markdown fences.
 """
 
 
+_det_idx = _build_skill_index("detection")
+
 LLM_DISCOVERY_INSTRUCTION = f"""\
 You are the AI-driven half of the discovery phase. You orchestrate
 detection skills against a target codebase using your training knowledge and
@@ -291,7 +293,7 @@ which grep_code patterns to run, what confirms a real finding vs a false
 positive, and what severity/CWE/rule_id to assign. Call load_skill(skill_id)
 to read the full procedure for any skill that looks relevant.
 
-{_build_skill_index('detection')}
+{_det_idx}
 
 ## Workflow
 
@@ -430,6 +432,8 @@ array, no prose, no Markdown fences.
 """
 
 
+_val_idx = _build_skill_index("validation")
+
 VALIDATION_INSTRUCTION = f"""\
 You are the validation phase of a vulnerability scanner.
 
@@ -454,7 +458,7 @@ validation playbook exists for that vulnerability class. Call
 Follow the playbook's step-by-step instructions for mock setup, exploit
 script synthesis, and result interpretation.
 
-{_build_skill_index('validation')}
+{_val_idx}
 
 ## Symbol & Caller Tracing (For Exploit Chains & Reachability)
 If the suspect vulnerability resides inside an internal helper, library, or data-access function, you should trace its data flow up to a public controller, handler, or API route.
@@ -598,7 +602,9 @@ llm_discovery_agent = Agent(
     name="llm_discovery_agent",
     model=_model_fast(),
     generate_content_config=DETERMINISTIC_CONFIG,
-    description="AI-driven vulnerability discovery using a skill-directory of detection playbooks.",
+    description=(
+        "AI-driven vulnerability discovery using detection playbooks."
+    ),
     instruction=LLM_DISCOVERY_INSTRUCTION,
     tools=[
         list_dir,
@@ -633,7 +639,9 @@ triage_agent = Agent(
 validation_agent = Agent(
     name="validation_agent",
     model=_model(),
-    description="Validates triaged findings by reading code and reasoning about exploitability.",
+    description=(
+        "Validates findings by reading code and checking exploitability."
+    ),
     instruction=VALIDATION_INSTRUCTION,
     tools=[read_code_window, find_references, execute_in_sandbox, load_skill],
     output_key="validated_findings",
@@ -644,7 +652,9 @@ remediation_agent = Agent(
     name="remediation_agent",
     model=_model(),
     generate_content_config=DETERMINISTIC_CONFIG,
-    description="Synthesizes safe, compiler-verified code fix patches (Diffs) for validated findings.",
+    description=(
+        "Synthesizes safe, verified fix Diffs for validated findings."
+    ),
     instruction=REMEDIATION_INSTRUCTION,
     tools=[
         read_code_window,
@@ -661,7 +671,7 @@ remediation_agent = Agent(
 report_agent = Agent(
     name="report_agent",
     model=_model(),
-    description="Writes the final Markdown vulnerability report to ./reports/.",
+    description="Writes final Markdown vulnerability report to ./reports/.",
     instruction=REPORT_INSTRUCTION,
     tools=[write_report],
 )
@@ -669,7 +679,9 @@ report_agent = Agent(
 
 root_agent = SequentialAgent(
     name="root_agent",
-    description="VulnCatcher vulnerability scanning pipeline: discover → triage → validate → remediate → report.",
+    description=(
+        "VulnCatcher scanning pipeline: discover -> triage -> validate."
+    ),
     sub_agents=[
         discovery_phase,
         triage_agent,

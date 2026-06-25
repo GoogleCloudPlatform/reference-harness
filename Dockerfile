@@ -20,14 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv and google-agents-cli
-# hadolint ignore=DL3059
 RUN pip install --no-cache-dir uv==0.8.13 && \
     uv tool install "google-agents-cli>=0.2.0"
 ENV PATH="/root/.local/bin:${PATH}"
 
 # Install Semgrep
-# hadolint ignore=DL3059,DL3013
-RUN pip install --no-cache-dir semgrep
+RUN pip install --no-cache-dir semgrep==1.168.0
 
 # Install Gitleaks
 ARG GITLEAKS_VERSION=8.30.1
@@ -43,8 +41,8 @@ RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/
     | sh -s -- -b /usr/local/bin
 
 # Install Bandit
-# hadolint ignore=DL3059,DL3013
-RUN pip install --no-cache-dir bandit
+# hadolint ignore=DL3059
+RUN pip install --no-cache-dir bandit==1.9.4
 
 WORKDIR /code
 

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Integration end-to-end tests for Reference Harness server."""
+
 import json
 import logging
 import os
@@ -89,7 +91,7 @@ def wait_for_server(timeout: int = 90, interval: int = 1) -> bool:
         except RequestException:
             pass
         time.sleep(interval)
-    logger.error(f"Server did not become ready within {timeout} seconds")
+    logger.error("Server did not become ready within %s seconds", timeout)
     return False
 
 
@@ -112,6 +114,8 @@ def server_fixture(request: Any) -> Iterator[subprocess.Popen[str]]:
     yield server_process
 
 
+# Disabling redefined-outer-name and unused-argument for Pytest server fixture
+# pylint: disable-next=redefined-outer-name,unused-argument
 def test_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
     """Test the chat stream functionality."""
     logger.info("Starting chat stream test")
@@ -130,7 +134,7 @@ def test_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
         timeout=180,
     )
     assert session_response.status_code == 200
-    logger.info(f"Session creation response: {session_response.json()}")
+    logger.info("Session creation response: %s", session_response.json())
     session_id = session_response.json()["id"]
 
     # Then send chat message
@@ -177,6 +181,8 @@ def test_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
 
 
 def test_chat_stream_error_handling(
+    # Disabling redefined-outer-name and unused-argument for fixture
+    # pylint: disable-next=redefined-outer-name,unused-argument
     server_fixture: subprocess.Popen[str],
 ) -> None:
     """Test the chat stream error handling."""
@@ -196,6 +202,8 @@ def test_chat_stream_error_handling(
     logger.info("Error handling test completed successfully")
 
 
+# Disabling redefined-outer-name and unused-argument for Pytest server fixture
+# pylint: disable-next=redefined-outer-name,unused-argument
 def test_collect_feedback(server_fixture: subprocess.Popen[str]) -> None:
     """
     Test the feedback collection endpoint (/feedback) to ensure it properly

@@ -534,8 +534,8 @@ images:
 ```bash
 # Connect your GitHub repo (interactive, one-time)
 gcloud builds triggers create github \
-    --repo-name=global-solutions-reference-harness \
-    --repo-owner=cloud-gtm \
+    --repo-name=cloud-solutions \
+    --repo-owner=GoogleCloudPlatform \
     --branch-pattern="^main$" \
     --build-config=cloudbuild.yaml \
     --project=${PROJECT_ID}
@@ -615,7 +615,7 @@ gcloud iam workload-identity-pools providers create-oidc github-provider \
 # Grant the federated identity permission to invoke Cloud Run
 gcloud run services add-iam-policy-binding rh \
     --region=${REGION} \
-    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/cloud-gtm/customer-repo" \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/GoogleCloudPlatform/cloud-solutions" \
     --role="roles/run.invoker"
 ```
 

@@ -1,10 +1,28 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Main CLI entry point for Reference Harness vulnerability scanner."""
+
+import argparse
+import concurrent.futures
 import json
 import logging
 import os
 import re
-import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -15,9 +33,11 @@ from app.cli.results import compile_and_render_results
 from app.cli.server import ADKServerManager
 from app.cli.streaming import get_active_line_text
 from app.tools import map_boundaries
+from google.cloud import storage
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
+from rich.table import Table
 
 
 def extract_json_objects(text):
@@ -26,9 +46,9 @@ def extract_json_objects(text):
         data = json.loads(text)
         if isinstance(data, list):
             return data
-        elif isinstance(data, dict):
+        if isinstance(data, dict):
             return [data]
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
     start = 0
@@ -65,7 +85,7 @@ def extract_json_objects(text):
                 obj = json.loads(sub_str)
                 if isinstance(obj, dict):
                     objs.append(obj)
-            except Exception:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
             start = end + 1
         else:
@@ -101,7 +121,7 @@ def extract_validated_findings(text):
                 uri = locations[0]["physicalLocation"]["artifactLocation"][
                     "uri"
                 ]
-            except Exception:
+            except (KeyError, IndexError, TypeError):
                 pass
         if not uri:
             uri = obj.get("uri")
@@ -136,6 +156,67 @@ def extract_validated_findings(text):
     return findings
 
 
+def _fallback_extract_findings(text):
+    rule_matches = re.findall(r'"ruleId":\s*"([^"]+)"', text)
+    uri_matches = re.findall(r'"uri":\s*"([^"]+)"', text)
+    val_type_matches = re.findall(r'"validation_type":\s*"([^"]+)"', text)
+    cve_matches = re.findall(r"(CVE-\d{4}-\d{4,7})", text)
+    res = []
+    for r_idx, rule in enumerate(rule_matches):
+        uri = uri_matches[r_idx] if r_idx < len(uri_matches) else "?"
+        vtype = (
+            val_type_matches[r_idx]
+            if r_idx < len(val_type_matches)
+            else "STATIC"
+        )
+        cve = cve_matches[0] if cve_matches else None
+        res.append({"rule": rule, "uri": uri, "val_type": vtype, "cve": cve})
+    return res
+
+
+def _log_validated_finding(f_item, feedback_logs, con):
+    rule = f_item["rule"]
+    uri = f_item["uri"]
+    key = f"{rule}@{uri}"
+    if key in feedback_logs:
+        return False
+    feedback_logs.add(key)
+    val_type = f_item["val_type"]
+    cve = f_item["cve"]
+    cve_str = f"{cve} (" if cve else ""
+    cve_suffix = ")" if cve else ""
+    f_base = os.path.basename(uri)
+    msg = (
+        "🔥 [bold red]Vulnerability Validated ("
+        f"{val_type}):[/] [bold magenta]{cve_str}[/][underline yellow]"
+        f"{rule}[/][bold magenta]{cve_suffix}[/] inside [underline]{f_base}[/]"
+    )
+    con.print(msg)
+    return True
+
+
+def _process_validated_event(text, feedback_logs, con):
+    findings = extract_validated_findings(text)
+    if not findings:
+        findings = _fallback_extract_findings(text)
+    count = 0
+    for f_item in findings:
+        if _log_validated_finding(f_item, feedback_logs, con):
+            count += 1
+    return count
+
+
+def _update_cnt(cnt, text, logs, con):
+    if "validated" not in text.lower():
+        return cnt
+    if '"validated": true' not in text.lower():
+        return cnt
+    try:
+        return cnt + _process_validated_event(text, logs, con)
+    except (ValueError, KeyError, TypeError):
+        return cnt
+
+
 # Set up logging for CLI execution
 logging.basicConfig(
     level=logging.DEBUG,
@@ -149,8 +230,6 @@ if os.environ.get("VULNCATCHER_DEBUG") != "1":
 
 
 def main():
-    import argparse
-
     console = Console()
 
     parser = argparse.ArgumentParser(
@@ -167,7 +246,7 @@ def main():
         "--chunk-size",
         type=int,
         default=25,
-        help="Override the max number of boundary files processed in each chunk batch",
+        help="Max number of boundary files processed in each chunk batch",
     )
     parser.add_argument(
         "--location", help="Override the GCP Vertex AI region location"
@@ -176,12 +255,12 @@ def main():
         "--parallel",
         type=int,
         default=1,
-        help="Number of concurrent workers for executing chunked scan batches",
+        help="Concurrent workers for executing chunked scan batches",
     )
     parser.add_argument(
         "--scan-all",
         action="store_true",
-        help="Bypass boundary filters and deep-scan every source file in the directory",
+        help="Bypass filters and scan every source file in directory",
     )
     parser.add_argument(
         "--output-format",
@@ -236,31 +315,32 @@ def main():
     if gcs_bucket:
         gcs_bucket = gcs_bucket.strip("“\"'”‘’")
         console.print(
-            f"[bold yellow]↻ Verifying GCS bucket [underline cyan]{gcs_bucket}[/] exists...[/]"
+            "[bold yellow]↻ Verifying GCS bucket [underline cyan]"
+            f"{gcs_bucket}[/] exists...[/]"
         )
         try:
-            from google.cloud import storage
-
             storage_client = storage.Client()
             bucket = storage_client.lookup_bucket(gcs_bucket)
             if not bucket:
                 console.print(
-                    f"[bold red]Error:[/] GCS bucket [underline cyan]{gcs_bucket}[/] does not exist or is not accessible under your active credentials."
+                    "[bold red]Error:[/] GCS bucket [underline cyan]"
+                    f"{gcs_bucket}[/] does not exist or is not accessible."
                 )
                 sys.exit(1)
             console.print(
-                f"[bold green]✓ Verified GCS bucket [underline cyan]{gcs_bucket}[/] exists.[/]"
+                f"[bold green]✓ Verified GCS bucket [underline cyan]"
+                f"{gcs_bucket}[/] exists.[/]"
             )
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Catching Exception because GCP storage lookup errors vary
             console.print(
-                f"[bold red]Error verifying GCS bucket [underline cyan]{gcs_bucket}[/]:[/] {str(e)}"
+                "[bold red]Error verifying GCS bucket [underline cyan]"
+                f"{gcs_bucket}[/]:[/] {str(e)}"
             )
-            console.print(
-                "[dim]Please check your network connection, bucket permissions, or active GCP Application Default Credentials.[/]"
-            )
+            console.print("[dim]Please check connection or ADC permissions.[/]")
             sys.exit(1)
 
-    # Set location env var early so the bootstrapper can use it for model routing
+    # Set location env var early so bootstrapper uses it for model routing
     if args.location:
         os.environ["GOOGLE_CLOUD_LOCATION"] = args.location
 
@@ -278,14 +358,16 @@ def main():
 
     boot_path = str(adk_dir / "bootstrapped_signatures.json")
     if boot_data:
-        with open(boot_path, "w") as f:
+        with open(boot_path, "w", encoding="utf-8") as f:
             json.dump(boot_data, f, indent=2)
     else:
         if os.path.exists(boot_path):
             try:
                 os.remove(boot_path)
-            except Exception as e:
-                logger.warning(f"Failed to remove bootstrapped signatures: {e}")
+            except OSError as e:
+                logger.warning(
+                    "Failed to remove bootstrapped signatures: %s", e
+                )
 
     env = os.environ.copy()
     env["UV_NO_SYNC"] = "1"
@@ -306,17 +388,17 @@ def main():
     if os.path.exists(db_path):
         try:
             os.remove(db_path)
-        except Exception as e:
-            logger.warning(f"Failed to remove active session database: {e}")
+        except OSError as e:
+            logger.warning("Failed to remove active session db: %s", e)
 
     for suffix in ["-wal", "-journal", "-shm"]:
         p = db_path + suffix
         if os.path.exists(p):
             try:
                 os.remove(p)
-            except Exception as e:
+            except OSError as e:
                 logger.warning(
-                    f"Failed to remove database journal/wal helper: {e}"
+                    "Failed to remove database journal helper: %s", e
                 )
 
     subprocess.run(
@@ -324,11 +406,13 @@ def main():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        check=False,
     )
 
     if args.scan_all:
         console.print(
-            "[bold yellow]↻ Deep Scan Mode Enabled: Bypassing boundary filters and mapping all source files...[/]"
+            "[bold yellow]↻ Deep Scan Mode: Bypassing boundary filters "
+            "and mapping all source files...[/]"
         )
         boundary_files = []
         skip_dirs = {
@@ -377,14 +461,16 @@ def main():
 
     boundary_log_path = str(adk_dir / "boundary_files.log")
     try:
-        with open(boundary_log_path, "w") as lf:
+        with open(boundary_log_path, "w", encoding="utf-8") as lf:
+            count_str = str(len(boundary_files))
             lf.write(
-                f"=== HARVESTED ACTIVE CODEBASE BOUNDARIES ({len(boundary_files)} files) ===\n\n"
+                "=== HARVESTED ACTIVE CODEBASE BOUNDARIES "
+                f"({count_str} files) ===\n\n"
             )
             for f_path in boundary_files:
                 lf.write(f"• {f_path}\n")
-    except Exception as e:
-        logger.warning(f"Failed to write codebase boundaries log: {e}")
+    except OSError as e:
+        logger.warning("Failed to write codebase boundaries log: %s", e)
 
     batch_size = args.chunk_size
     batches = [
@@ -395,7 +481,9 @@ def main():
         batches = [[]]
 
     console.print(
-        f"[bold green]✓ Codebase boundaries compiled: [underline cyan]{len(boundary_files)}[/] files split into [underline cyan]{len(batches)}[/] Chunked Batches.[/]"
+        f"[bold green]✓ Codebase boundaries compiled: [underline cyan]"
+        f"{len(boundary_files)}[/] files split into [underline cyan]"
+        f"{len(batches)}[/] Chunked Batches.[/]"
     )
 
     port = server_manager.start_adk_server(env)
@@ -412,9 +500,6 @@ def main():
             parallel_workers = 1
 
     if parallel_workers > 1:
-        import concurrent.futures
-        import threading
-
         lock = threading.Lock()
         batch_states = {}
 
@@ -428,11 +513,7 @@ def main():
                 "elapsed": 0.0,
             }
 
-        # Helper to render the concurrent progress dashboard table inside a Panel
         def render_progress_panel():
-            from rich.panel import Panel
-            from rich.table import Table
-
             table = Table(box=None, padding=(0, 2))
             table.add_column("Batch", style="cyan", width=18)
             table.add_column("Phase/Status", style="green")
@@ -471,7 +552,7 @@ def main():
                         phase_display = "[bold green]✓ Completed[/]"
                         tool_str = "-"
                     elif status == "failed":
-                        phase_display = f"[bold red]✗ Failed[/]"
+                        phase_display = "[bold red]✗ Failed[/]"
                         tool_str = "-"
                     elif status == "queued":
                         phase_display = "[dim]Queued...[/]"
@@ -488,7 +569,10 @@ def main():
                     )
             return Panel(
                 table,
-                title="[bold green]Reference Harness Concurrent Audit Progress[/]",
+                title=(
+                    "[bold green]Reference Harness Concurrent Audit "
+                    "Progress[/]"
+                ),
                 border_style="green",
             )
 
@@ -505,22 +589,33 @@ def main():
 
             for attempt in range(3):
                 try:
-                    session_url = f"http://127.0.0.1:{port}/apps/app/users/cli-user/sessions"
-                    session_resp = requests.post(
-                        session_url, json={}, timeout=120
+                    s_base = (
+                        f"http://127.0.0.1:{port}/apps/app/"
+                        "users/cli-user/sessions"
                     )
+                    session_resp = requests.post(s_base, json={}, timeout=120)
                     if not session_resp.ok:
-                        raise Exception(
-                            f"Failed to create chunk session (HTTP {session_resp.status_code}): {session_resp.text}"
+                        err_text = session_resp.text
+                        raise RuntimeError(
+                            f"Failed to create chunk session "
+                            f"(HTTP {session_resp.status_code}): {err_text}"
                         )
 
                     current_session_id = session_resp.json().get("id")
 
                     if batch:
                         batch_paths = [os.path.abspath(p) for p in batch]
-                        initial_prompt = f"Scan {os.path.abspath(target_dir)} focusing strictly on these boundary files: {json.dumps(batch_paths)}. Validate and remediate."
+                        b_json = json.dumps(batch_paths)
+                        initial_prompt = (
+                            f"Scan {os.path.abspath(target_dir)} "
+                            "focusing strictly on these boundary files: "
+                            f"{b_json}. Validate and remediate."
+                        )
                     else:
-                        initial_prompt = f"Scan {os.path.abspath(target_dir)} for vulnerabilities and write a report."
+                        initial_prompt = (
+                            f"Scan {os.path.abspath(target_dir)} "
+                            "for vulnerabilities and write a report."
+                        )
 
                     phases = [
                         {
@@ -530,38 +625,47 @@ def main():
                         },
                         {
                             "key": "scanners",
-                            "name": "Executing static scanners (Semgrep/Trivy/Gitleaks/Bandit)",
+                            "name": (
+                                "Executing static scanners "
+                                "(Semgrep/Trivy/Gitleaks/Bandit)"
+                            ),
                             "match": "scanner_allowlist",
                         },
                         {
                             "key": "llm_discovery",
-                            "name": "Auditing codebase (AI-driven playbooks)",
+                            "name": "Auditing codebase (AI playbooks)",
                             "match": "llm_discovery_agent",
                         },
                         {
                             "key": "triage",
-                            "name": "Triage Critic filtering FPs & clustering findings",
+                            "name": "Triage Critic filtering FPs",
                             "match": "triage_agent",
                         },
                         {
                             "key": "validation",
-                            "name": "Validation Agent tracing reachability & sandbox execution",
+                            "name": (
+                                "Validation Agent tracing reachability "
+                                "& sandbox execution"
+                            ),
                             "match": "validation_agent",
                         },
                         {
                             "key": "remediate",
-                            "name": "Remediation Agent synthesizing safe code patches",
+                            "name": (
+                                "Remediation Agent synthesizing safe "
+                                "code patches"
+                            ),
                             "match": "remediation_agent",
                         },
                         {
                             "key": "report",
-                            "name": "Report Agent compiling final markdown report",
+                            "name": "Report Agent compiling report",
                             "match": "report_agent",
                         },
                     ]
 
                     active_index = 0
-                    phase_start = time.time()
+                    _ = time.time()
                     feedback_logs = set()
                     current_running_tool = None
                     validated_findings_count = 0
@@ -571,13 +675,19 @@ def main():
                     active_text_prompt = initial_prompt
 
                     TOOL_DISPLAY_MAP = {
-                        "run_sandbox_command": "Verifying exploit inside secure sandbox",
-                        "read_code_window": "Analyzing code context & semantics",
+                        "run_sandbox_command": (
+                            "Verifying exploit inside sandbox"
+                        ),
+                        "read_code_window": (
+                            "Analyzing code context & semantics"
+                        ),
                         "grep_code": "Searching codebase for references",
-                        "write_file_content": "Synthesizing unified code patches",
-                        "load_skill": "Loading expert vulnerability playbooks",
-                        "find_references": "Tracing symbol cross-references",
-                        "write_report": "Compiling Markdown audit report",
+                        "write_file_content": (
+                            "Synthesizing unified code patches"
+                        ),
+                        "load_skill": "Loading expert playbooks",
+                        "find_references": "Tracing symbol references",
+                        "write_report": "Compiling Markdown report",
                         "semgrep": "Running Semgrep SAST engine",
                         "trivy": "Running Trivy SCA dependency checks",
                         "bandit": "Running Bandit Python scanner",
@@ -590,8 +700,13 @@ def main():
                         and continuation_count < max_continuations
                     ):
                         if continuation_count > 0:
-                            active_text_prompt = "[SYSTEM NOTICE: Output cutoff triggered by maximum token limitations. Resume operations exactly from where you left off. Synthesize remaining patches or finish writing the final report immediately.]"
-                            phase_start = time.time()
+                            active_text_prompt = (
+                                "[SYSTEM NOTICE: Output cutoff triggered by "
+                                "maximum token limitations. Resume exactly "
+                                "from where you left off. Synthesize "
+                                "remaining patches or finish writing report.]"
+                            )
+                            _ = time.time()
 
                         payload = {
                             "app_name": "app",
@@ -610,8 +725,10 @@ def main():
                             timeout=(60, None),
                         ) as resp:
                             if not resp.ok:
-                                raise Exception(
-                                    f"Failed to process scan cycle (HTTP {resp.status_code}): {resp.text}"
+                                err_text = resp.text
+                                raise RuntimeError(
+                                    f"Failed to process scan cycle "
+                                    f"(HTTP {resp.status_code}): {err_text}"
                                 )
 
                             try:
@@ -774,92 +891,19 @@ def main():
                                             in text.lower()
                                         ):
                                             try:
-                                                findings = (
-                                                    extract_validated_findings(
-                                                        text
-                                                    )
+                                                cnt = _process_validated_event(
+                                                    text,
+                                                    feedback_logs,
+                                                    console,
                                                 )
-                                                if not findings:
-                                                    rule_matches = re.findall(
-                                                        r'"ruleId":\s*"([^"]+)"',
-                                                        text,
-                                                    )
-                                                    uri_matches = re.findall(
-                                                        r'"uri":\s*"([^"]+)"',
-                                                        text,
-                                                    )
-                                                    val_type_matches = re.findall(
-                                                        r'"validation_type":\s*"([^"]+)"',
-                                                        text,
-                                                    )
-                                                    cve_matches = re.findall(
-                                                        r"(CVE-\d{4}-\d{4,7})",
-                                                        text,
-                                                    )
-                                                    for (
-                                                        r_idx,
-                                                        rule,
-                                                    ) in enumerate(
-                                                        rule_matches
-                                                    ):
-                                                        uri = (
-                                                            uri_matches[r_idx]
-                                                            if r_idx
-                                                            < len(uri_matches)
-                                                            else "?"
-                                                        )
-                                                        val_type = (
-                                                            val_type_matches[
-                                                                r_idx
-                                                            ]
-                                                            if r_idx
-                                                            < len(
-                                                                val_type_matches
-                                                            )
-                                                            else "STATIC"
-                                                        )
-                                                        findings.append(
-                                                            {
-                                                                "rule": rule,
-                                                                "uri": uri,
-                                                                "val_type": val_type,
-                                                                "cve": (
-                                                                    cve_matches[
-                                                                        0
-                                                                    ]
-                                                                    if cve_matches
-                                                                    else None
-                                                                ),
-                                                            }
-                                                        )
-                                                for f_item in findings:
-                                                    rule = f_item["rule"]
-                                                    uri = f_item["uri"]
-                                                    val_type = f_item[
-                                                        "val_type"
-                                                    ]
-                                                    cve = f_item["cve"]
-
-                                                    cve_str = (
-                                                        f"{cve} ("
-                                                        if cve
-                                                        else ""
-                                                    )
-                                                    cve_suffix = (
-                                                        ")" if cve else ""
-                                                    )
-                                                    key = f"{rule}@{uri}"
-                                                    if key not in feedback_logs:
-                                                        feedback_logs.add(key)
-                                                        validated_findings_count += (
-                                                            1
-                                                        )
-                                                        console.print(
-                                                            f"🔥 [bold red]Vulnerability Validated ({val_type}):[/] [bold magenta]{cve_str}[/][underline yellow]{rule}[/][bold magenta]{cve_suffix}[/] inside [underline]{os.path.basename(uri)}[/]"
-                                                        )
-                                            except Exception as e:
+                                                validated_findings_count += cnt
+                                            except (
+                                                ValueError,
+                                                KeyError,
+                                                TypeError,
+                                            ) as e:
                                                 logger.debug(
-                                                    f"Failed to extract validated findings from agent text: {e}"
+                                                    "Parse error: %s", e
                                                 )
 
                                     if (
@@ -867,7 +911,9 @@ def main():
                                         and "sandbox" not in feedback_logs
                                     ):
                                         console.print(
-                                            "[bold cyan]↻[/] [dim]Validation Agent initiated secure container execution...[/]"
+                                            "[bold cyan]↻[/] [dim]Validation "
+                                            "Agent initiated container "
+                                            "execution...[/]"
                                         )
                                         feedback_logs.add("sandbox")
                                     elif (
@@ -875,7 +921,9 @@ def main():
                                         and "references" not in feedback_logs
                                     ):
                                         console.print(
-                                            "[bold cyan]↻[/] [dim]Validation Agent initiated call-tree symbol reference tracing...[/]"
+                                            "[bold cyan]↻[/] [dim]Validation "
+                                            "Agent initiated symbol reference "
+                                            "tracing...[/]"
                                         )
                                         feedback_logs.add("references")
 
@@ -898,7 +946,7 @@ def main():
 
                                         if matched:
                                             active_index = idx
-                                            phase_start = time.time()
+                                            _ = time.time()
                                             current_running_tool = None
                                             break
 
@@ -916,23 +964,36 @@ def main():
                                                 if current_running_tool
                                                 else ""
                                             ),
-                                            "validated_findings": validated_findings_count,
+                                            "validated_findings": (
+                                                validated_findings_count
+                                            ),
                                             "elapsed": time.time()
                                             - batch_start_time,
                                         }
-                            except Exception as e:
+                            # Catching specific errors because SSE errors vary
+                            except (
+                                AttributeError,
+                                KeyError,
+                                OSError,
+                                RuntimeError,
+                                TypeError,
+                                ValueError,
+                            ) as e:
                                 logger.debug(
-                                    f"SSE line processing exception in parallel thread: {e}"
+                                    "SSE line exception in thread: %s", e
                                 )
                                 time.sleep(1.5)
 
                             with lock:
+                                p_name = phases[active_index]["name"]
                                 batch_states[batch_idx] = {
                                     "status": "running",
-                                    "phase_name": phases[active_index]["name"],
+                                    "phase_name": p_name,
                                     "current_tool": "",
-                                    "validated_findings": validated_findings_count,
-                                    "elapsed": time.time() - batch_start_time,
+                                    "validated_findings": (
+                                        validated_findings_count
+                                    ),
+                                    "elapsed": (time.time() - batch_start_time),
                                 }
 
                         continuation_count += 1
@@ -947,9 +1008,13 @@ def main():
                         }
                     return current_session_id
 
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    # Catching Exception because parallel thread errors vary
                     logger.error(
-                        f"Error executing parallel batch {batch_idx+1} (Attempt {attempt+1}): {e}"
+                        "Error in parallel batch %s (Attempt %s): %s",
+                        batch_idx + 1,
+                        attempt + 1,
+                        e,
                     )
                     if attempt < 2:
                         time.sleep(5.0)
@@ -959,10 +1024,12 @@ def main():
                                 "status": "failed",
                                 "phase_name": f"Failed: {str(e)}",
                                 "current_tool": "",
-                                "validated_findings": validated_findings_count,
+                                "validated_findings": (
+                                    validated_findings_count
+                                ),
                                 "elapsed": time.time() - batch_start_time,
                             }
-                        raise e
+                        raise
 
         # Execute using ThreadPoolExecutor
         batch_session_ids = [None] * len(batches)
@@ -990,16 +1057,25 @@ def main():
                         try:
                             session_id = f.result()
                             batch_session_ids[idx] = session_id
-                        except Exception:
+                        except (
+                            AttributeError,
+                            KeyError,
+                            OSError,
+                            RuntimeError,
+                            TypeError,
+                            ValueError,
+                        ):
+                            # Catching specific errors for thread tasks
                             pass
 
                     live.update(render_progress_panel())
         except KeyboardInterrupt:
             executor.shutdown(wait=False, cancel_futures=True)
             console.print(
-                "\n[bold red]⚠ Execution interrupted by user (Ctrl+C). Exiting immediately...[/]"
+                "\n[bold red]⚠ Execution interrupted by user (Ctrl+C). "
+                "Exiting immediately...[/]"
             )
-            os._exit(1)
+            os._exit(1)  # pylint: disable=protected-access
         finally:
             executor.shutdown(wait=True)
 
@@ -1009,7 +1085,7 @@ def main():
         ]
 
     else:
-        # Fallback to the exact serial logic originally implemented (100% backward compatible)
+        # Fallback to exact serial logic originally implemented
         for batch_idx, batch in enumerate(batches):
             batch_success = False
 
@@ -1021,29 +1097,44 @@ def main():
                     if len(batches) > 1:
                         if attempt == 0:
                             console.print(
-                                f"\n[bold cyan]↻ Executing Chunked Batch {batch_idx+1}/{len(batches)} ({len(batch)} files)...[/]"
+                                "\n[bold cyan]↻ Executing Chunked Batch "
+                                f"{batch_idx+1}/{len(batches)} "
+                                f"({len(batch)} files)...[/]"
                             )
                         else:
                             console.print(
-                                f"\n[bold yellow]↻ Retrying Chunked Batch {batch_idx+1}/{len(batches)} (Attempt {attempt+1}/3)...[/]"
+                                "\n[bold yellow]↻ Retrying Chunked Batch "
+                                f"{batch_idx+1}/{len(batches)} "
+                                f"(Attempt {attempt+1}/3)...[/]"
                             )
 
-                    session_url = f"http://127.0.0.1:{port}/apps/app/users/cli-user/sessions"
-                    session_resp = requests.post(
-                        session_url, json={}, timeout=120
+                    s_base = (
+                        f"http://127.0.0.1:{port}/apps/app/"
+                        "users/cli-user/sessions"
                     )
+                    session_resp = requests.post(s_base, json={}, timeout=120)
                     if not session_resp.ok:
-                        raise Exception(
-                            f"Failed to create chunk session (HTTP {session_resp.status_code}): {session_resp.text}"
+                        err_text = session_resp.text
+                        raise RuntimeError(
+                            f"Failed to create chunk session "
+                            f"(HTTP {session_resp.status_code}): {err_text}"
                         )
 
                     current_session_id = session_resp.json().get("id")
 
                     if batch:
                         batch_paths = [os.path.abspath(p) for p in batch]
-                        initial_prompt = f"Scan {os.path.abspath(target_dir)} focusing strictly on these codebase boundary files: {json.dumps(batch_paths)}. Validate and remediate."
+                        b_json = json.dumps(batch_paths)
+                        initial_prompt = (
+                            f"Scan {os.path.abspath(target_dir)} "
+                            "focusing strictly on these codebase boundary "
+                            f"files: {b_json}. Validate and remediate."
+                        )
                     else:
-                        initial_prompt = f"Scan {os.path.abspath(target_dir)} for vulnerabilities and write a report."
+                        initial_prompt = (
+                            f"Scan {os.path.abspath(target_dir)} "
+                            "for vulnerabilities and write a report."
+                        )
 
                     phases = [
                         {
@@ -1053,38 +1144,47 @@ def main():
                         },
                         {
                             "key": "scanners",
-                            "name": "Executing static scanners (Semgrep/Trivy/Gitleaks/Bandit)",
+                            "name": (
+                                "Executing static scanners "
+                                "(Semgrep/Trivy/Gitleaks/Bandit)"
+                            ),
                             "match": "scanner_allowlist",
                         },
                         {
                             "key": "llm_discovery",
-                            "name": "Auditing codebase (AI-driven playbooks)",
+                            "name": "Auditing codebase (AI playbooks)",
                             "match": "llm_discovery_agent",
                         },
                         {
                             "key": "triage",
-                            "name": "Triage Critic filtering FPs & clustering findings",
+                            "name": "Triage Critic filtering FPs",
                             "match": "triage_agent",
                         },
                         {
                             "key": "validation",
-                            "name": "Validation Agent tracing reachability & sandbox execution",
+                            "name": (
+                                "Validation Agent tracing reachability "
+                                "& sandbox execution"
+                            ),
                             "match": "validation_agent",
                         },
                         {
                             "key": "remediate",
-                            "name": "Remediation Agent synthesizing safe code patches",
+                            "name": (
+                                "Remediation Agent synthesizing safe "
+                                "code patches"
+                            ),
                             "match": "remediation_agent",
                         },
                         {
                             "key": "report",
-                            "name": "Report Agent compiling final markdown report",
+                            "name": "Report Agent compiling report",
                             "match": "report_agent",
                         },
                     ]
 
                     active_index = 0
-                    phase_start = time.time()
+                    _phase_start = time.time()
                     feedback_logs = set()
                     current_running_tool = None
                     validated_findings_count = 0
@@ -1098,8 +1198,13 @@ def main():
                         and continuation_count < max_continuations
                     ):
                         if continuation_count > 0:
-                            active_text_prompt = "[SYSTEM NOTICE: Output cutoff triggered by maximum token limitations. Resume operations exactly from where you left off. Synthesize remaining patches or finish writing the final report immediately.]"
-                            phase_start = time.time()
+                            active_text_prompt = (
+                                "[SYSTEM NOTICE: Output cutoff triggered by "
+                                "maximum token limitations. Resume exactly "
+                                "from where you left off. Synthesize "
+                                "remaining patches or finish writing report.]"
+                            )
+                            _phase_start = time.time()
 
                         payload = {
                             "app_name": "app",
@@ -1118,14 +1223,16 @@ def main():
                             timeout=(60, None),
                         ) as resp:
                             if not resp.ok:
-                                raise Exception(
-                                    f"Failed to process scan cycle (HTTP {resp.status_code}): {resp.text}"
+                                err_text = resp.text
+                                raise RuntimeError(
+                                    f"Failed to process scan cycle "
+                                    f"(HTTP {resp.status_code}): {err_text}"
                                 )
 
                             with Live(
                                 get_active_line_text(
                                     phases[active_index]["name"],
-                                    phase_start,
+                                    _phase_start,
                                     current_running_tool,
                                     validated_findings_count,
                                 ),
@@ -1291,118 +1398,24 @@ def main():
                                                             else text_clean
                                                         )
 
-                                                if (
-                                                    "validated" in text.lower()
-                                                    and '"validated": true'
-                                                    in text.lower()
-                                                ):
-                                                    try:
-                                                        findings = extract_validated_findings(
-                                                            text
-                                                        )
-                                                        if not findings:
-                                                            rule_matches = re.findall(
-                                                                r'"ruleId":\s*"([^"]+)"',
-                                                                text,
-                                                            )
-                                                            uri_matches = re.findall(
-                                                                r'"uri":\s*"([^"]+)"',
-                                                                text,
-                                                            )
-                                                            val_type_matches = re.findall(
-                                                                r'"validation_type":\s*"([^"]+)"',
-                                                                text,
-                                                            )
-                                                            cve_matches = re.findall(
-                                                                r"(CVE-\d{4}-\d{4,7})",
-                                                                text,
-                                                            )
-                                                            for (
-                                                                r_idx,
-                                                                rule,
-                                                            ) in enumerate(
-                                                                rule_matches
-                                                            ):
-                                                                uri = (
-                                                                    uri_matches[
-                                                                        r_idx
-                                                                    ]
-                                                                    if r_idx
-                                                                    < len(
-                                                                        uri_matches
-                                                                    )
-                                                                    else "?"
-                                                                )
-                                                                val_type = (
-                                                                    val_type_matches[
-                                                                        r_idx
-                                                                    ]
-                                                                    if r_idx
-                                                                    < len(
-                                                                        val_type_matches
-                                                                    )
-                                                                    else "STATIC"
-                                                                )
-                                                                findings.append(
-                                                                    {
-                                                                        "rule": rule,
-                                                                        "uri": uri,
-                                                                        "val_type": val_type,
-                                                                        "cve": (
-                                                                            cve_matches[
-                                                                                0
-                                                                            ]
-                                                                            if cve_matches
-                                                                            else None
-                                                                        ),
-                                                                    }
-                                                                )
-                                                        for f_item in findings:
-                                                            rule = f_item[
-                                                                "rule"
-                                                            ]
-                                                            uri = f_item["uri"]
-                                                            val_type = f_item[
-                                                                "val_type"
-                                                            ]
-                                                            cve = f_item["cve"]
-
-                                                            cve_str = (
-                                                                f"{cve} ("
-                                                                if cve
-                                                                else ""
-                                                            )
-                                                            cve_suffix = (
-                                                                ")"
-                                                                if cve
-                                                                else ""
-                                                            )
-                                                            key = (
-                                                                f"{rule}@{uri}"
-                                                            )
-                                                            if (
-                                                                key
-                                                                not in feedback_logs
-                                                            ):
-                                                                feedback_logs.add(
-                                                                    key
-                                                                )
-                                                                validated_findings_count += (
-                                                                    1
-                                                                )
-                                                                live.console.print(
-                                                                    f"🔥 [bold red]Vulnerability Validated ({val_type}):[/] [bold magenta]{cve_str}[/][underline yellow]{rule}[/][bold magenta]{cve_suffix}[/] inside [underline]{os.path.basename(uri)}[/]"
-                                                                )
-                                                    except Exception as e:
-                                                        logger.debug(
-                                                            f"Failed to extract validated findings from agent text: {e}"
-                                                        )
+                                                val_cnt = _update_cnt(
+                                                    validated_findings_count,
+                                                    text,
+                                                    feedback_logs,
+                                                    live.console,
+                                                )
+                                                validated_findings_count = (
+                                                    val_cnt
+                                                )
                                         if (
                                             "execute_in_sandbox" in event_str
                                             and "sandbox" not in feedback_logs
                                         ):
                                             live.console.print(
-                                                "[bold cyan]↻[/] [dim]Validation Agent initiated secure container execution...[/]"
+                                                "[bold cyan]↻[/] "
+                                                "[dim]Validation Agent "
+                                                "initiated container "
+                                                "execution...[/]"
                                             )
                                             feedback_logs.add("sandbox")
                                         elif (
@@ -1411,7 +1424,10 @@ def main():
                                             not in feedback_logs
                                         ):
                                             live.console.print(
-                                                "[bold cyan]↻[/] [dim]Validation Agent initiated call-tree symbol reference tracing...[/]"
+                                                "[bold cyan]↻[/] "
+                                                "[dim]Validation Agent "
+                                                "initiated symbol reference "
+                                                "tracing...[/]"
                                             )
                                             feedback_logs.add("references")
 
@@ -1434,22 +1450,30 @@ def main():
 
                                             if matched:
                                                 prev_elapsed = (
-                                                    time.time() - phase_start
+                                                    time.time() - _phase_start
                                                 )
+                                                p_name = phases[active_index][
+                                                    "name"
+                                                ]
                                                 live.console.print(
-                                                    f"[bold green]✓[/] {phases[active_index]['name']} [dim]({prev_elapsed:.1f}s)[/]"
+                                                    f"[bold green]✓[/] "
+                                                    f"{p_name} [dim]("
+                                                    f"{prev_elapsed:.1f}s)[/]"
                                                 )
                                                 active_index = idx
-                                                phase_start = time.time()
+                                                _phase_start = time.time()
                                                 current_running_tool = None
+                                                u_args = (
+                                                    phases[active_index][
+                                                        "name"
+                                                    ],
+                                                    _phase_start,
+                                                    current_running_tool,
+                                                    validated_findings_count,
+                                                )
                                                 live.update(
                                                     get_active_line_text(
-                                                        phases[active_index][
-                                                            "name"
-                                                        ],
-                                                        phase_start,
-                                                        current_running_tool,
-                                                        validated_findings_count,
+                                                        *u_args
                                                     )
                                                 )
                                                 break
@@ -1457,23 +1481,32 @@ def main():
                                         live.update(
                                             get_active_line_text(
                                                 phases[active_index]["name"],
-                                                phase_start,
+                                                _phase_start,
                                                 current_running_tool,
                                                 validated_findings_count,
                                             )
                                         )
-                                except Exception as e:
+                                except (
+                                    ValueError,
+                                    KeyError,
+                                    TypeError,
+                                    OSError,
+                                    RuntimeError,
+                                ) as e:
                                     logger.debug(
-                                        f"SSE line processing exception: {e}"
+                                        "SSE line processing exception: %s", e
                                     )
                                     live.console.print(
-                                        "[bold yellow]↻[/] [dim]Context border reached. Processing stateless continuation...[/]"
+                                        "[bold yellow]↻[/] [dim]Context border "
+                                        "reached. Processing continuation...[/]"
                                     )
                                     time.sleep(1.5)
 
-                                last_elapsed = time.time() - phase_start
+                                last_elapsed = time.time() - _phase_start
+                                p_name = phases[active_index]["name"]
                                 live.update(
-                                    f"[bold green]✓[/] {phases[active_index]['name']} [dim]({last_elapsed:.1f}s)[/]"
+                                    f"[bold green]✓[/] {p_name} [dim]("
+                                    f"{last_elapsed:.1f}s)[/]"
                                 )
 
                         continuation_count += 1
@@ -1482,13 +1515,17 @@ def main():
                     batch_success = True
                     break
 
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    # Catching Exception because batch cycle errors vary
                     logger.error(
-                        f"Error executing chunked batch {batch_idx+1}: {e}"
+                        "Error executing chunked batch %s: %s",
+                        batch_idx + 1,
+                        e,
                     )
                     if attempt < 2:
                         console.print(
-                            f"[bold red]⚠ Network interrupt during Batch {batch_idx+1}: {str(e)}. Retrying in 5 seconds...[/]"
+                            f"[bold red]⚠ Network interrupt during Batch "
+                            f"{batch_idx+1}: {str(e)}. Retrying in 5s...[/]"
                         )
                         time.sleep(5.0)
                     else:
@@ -1522,11 +1559,10 @@ def entry_point():
     try:
         main()
     except KeyboardInterrupt:
-        from rich.console import Console
-
         console = Console()
         console.print(
-            "\n[bold red]⚠ Scan interrupted by user (Ctrl+C). Cleaning up and exiting...[/]"
+            "\n[bold red]⚠ Scan interrupted by user (Ctrl+C). "
+            "Cleaning up and exiting...[/]"
         )
         try:
             # Force cleanup the agents background server
@@ -1535,11 +1571,13 @@ def entry_point():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=2,
+                check=False,
             )
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
-        os._exit(1)
-    except Exception as e:
+        os._exit(1)  # pylint: disable=protected-access
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Catching Exception at entry point to log and display fatal errors
         logger.exception(
             "Reference Harness execution failed due to unhandled exception"
         )
@@ -1549,12 +1587,10 @@ def entry_point():
                 ["agents-cli", "run", "--stop-server"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                check=False,
             )
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
-
-        from rich.console import Console
-        from rich.panel import Panel
 
         console = Console()
 
@@ -1568,9 +1604,10 @@ def entry_point():
             console.print(
                 Panel(
                     "[bold red]✗ Connection Timeout Alert[/]\n\n"
-                    "The Vertex AI API gateway took longer than 120 seconds to respond under high capacity load.\n"
-                    "Your previous scan results have been fully cached in the background.\n\n"
-                    "🚀 [bold cyan]Simply re-run the scan command to resolve instantly from cache![/]",
+                    "Vertex AI gateway timed out (>120s) under load.\n"
+                    "Your previous scan results are cached in background.\n\n"
+                    "🚀 [bold cyan]Re-run scan command to resolve from "
+                    "cache![/]",
                     border_style="red",
                     title="[bold red]Vertex AI Timeout[/]",
                 )

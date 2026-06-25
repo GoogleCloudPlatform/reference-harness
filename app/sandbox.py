@@ -1,3 +1,19 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Sandbox runtime execution utilities."""
+
 import os
 import shutil
 import subprocess
@@ -12,14 +28,15 @@ from rich.panel import Panel
 def execute_in_sandbox(
     code_content: str, payload_content: str, language: str = "javascript"
 ) -> dict:
-    """Execute suspect code and exploit payloads inside a secure runtime with configurable isolation levels.
+    """Execute suspect code inside secure runtime with configurable isolation.
 
     Environment Configurations:
-        VULNCATCHER_SANDBOX_MODE: "docker" (default) | "native" | "local" | "static"
+        VULNCATCHER_SANDBOX_MODE: docker (default)|native|local|static
         VULNCATCHER_SANDBOX_FALLBACK: "auto" (default) | "fail"
 
     Returns:
-        dict with 'status', 'exit_code', 'stdout', 'stderr', 'duration', and 'mode_used'.
+        dict with 'status', 'exit_code', 'stdout', 'stderr', 'duration',
+        'mode_used'.
     """
     console = Console()
 
@@ -54,7 +71,7 @@ def _run_with_mode(
     if mode == "static":
         return {
             "status": "skipped",
-            "reason": "Configured for static-only checks; dynamic validation bypassed.",
+            "reason": "Static-only checks; dynamic validation bypassed.",
             "mode_used": "static",
         }
 
@@ -64,7 +81,8 @@ def _run_with_mode(
             return res
         # Fallback cascade
         console.print(
-            "[bold yellow]⚠️ Sandbox Warning:[/] Docker execution failed or is not installed. Cascading fallback to 'native' OS sandboxing."
+            "[bold yellow]⚠️ Sandbox Warning:[/] Docker execution failed "
+            "or is not installed. Cascading fallback to 'native' OS sandboxing."
         )
         return _run_with_mode(
             code_content, payload_content, language, "native", fallback, console
@@ -76,19 +94,20 @@ def _run_with_mode(
             return res
         # Fallback cascade
         console.print(
-            "[bold yellow]⚠️ Sandbox Warning:[/] Native OS sandboxing failed. Cascading fallback to 'local' host execution."
+            "[bold yellow]⚠️ Sandbox Warning:[/] Native OS sandboxing failed. "
+            "Cascading fallback to 'local' host execution."
         )
         return _run_with_mode(
             code_content, payload_content, language, "local", fallback, console
         )
 
     if mode == "local":
-        # Print a highly visible warnings panel to alert developers about direct host executions
+        # Print a highly visible warnings panel to alert developers
         console.print(
             Panel(
                 "[bold red]⚠️ WARNING: DIRECT HOST EXECUTION[/]\n"
-                "Docker and Native OS sandboxing are unavailable or disabled.\n"
-                "Exploit validation scripts will run directly on your local machine runtime.\n"
+                "Docker and Native OS sandboxing are disabled.\n"
+                "Exploit validation scripts will run on your host.\n"
                 "Proceed with caution if scanning untrusted codebases.",
                 border_style="red",
                 title="[bold red]Sandbox Isolation Alert[/]",
@@ -100,7 +119,8 @@ def _run_with_mode(
 
         # Absolute bottom of the cascade: fallback to static
         console.print(
-            "[bold red]✗ Sandbox Error:[/] Local execution failed. Downgrading to 'static' triage."
+            "[bold red]✗ Sandbox Error:[/] Local execution failed. "
+            "Downgrading to 'static' triage."
         )
         return _run_with_mode(
             code_content, payload_content, language, "static", fallback, console
@@ -137,9 +157,13 @@ def _run_docker(code_content: str, payload_content: str, language: str) -> dict:
                 "error": f"Unsupported runtime: {language}",
             }
 
-        with open(os.path.join(temp_dir, target_filename), "w") as f:
+        with open(
+            os.path.join(temp_dir, target_filename), "w", encoding="utf-8"
+        ) as f:
             f.write(code_content)
-        with open(os.path.join(temp_dir, payload_filename), "w") as f:
+        with open(
+            os.path.join(temp_dir, payload_filename), "w", encoding="utf-8"
+        ) as f:
             f.write(payload_content)
 
         command = [
@@ -170,6 +194,7 @@ def _run_docker(code_content: str, payload_content: str, language: str) -> dict:
             stderr=subprocess.PIPE,
             text=True,
             timeout=10.0,
+            check=False,
         )
         duration = time.time() - start_time
 
@@ -181,7 +206,7 @@ def _run_docker(code_content: str, payload_content: str, language: str) -> dict:
             "duration": duration,
             "mode_used": "docker",
         }
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         return {"status": "error", "error": str(e)}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -190,7 +215,6 @@ def _run_docker(code_content: str, payload_content: str, language: str) -> dict:
 def _run_native_os(
     code_content: str, payload_content: str, language: str
 ) -> dict:
-    # Native sandboxing uses built-in kernel-level sandbox tools where available
     temp_dir = tempfile.mkdtemp()
 
     try:
@@ -212,19 +236,24 @@ def _run_native_os(
                 "error": f"Unsupported runtime: {language}",
             }
 
-        with open(os.path.join(temp_dir, target_filename), "w") as f:
+        with open(
+            os.path.join(temp_dir, target_filename), "w", encoding="utf-8"
+        ) as f:
             f.write(code_content)
-        with open(os.path.join(temp_dir, payload_filename), "w") as f:
+        with open(
+            os.path.join(temp_dir, payload_filename), "w", encoding="utf-8"
+        ) as f:
             f.write(payload_content)
 
         # Check for macOS native kernel sandbox profile
         if sys.platform == "darwin":
-            # sandbox-exec: allow default, deny outbound network, restrict file writes to temp dir only
+            # sandbox-exec: allow default, restrict network and file write
             sandbox_profile = (
                 "(version 1)"
                 "(allow default)"
                 "(deny network-outbound)"
-                f'(deny file-write* (require-not (subpath "{temp_dir}"))(require-not (subpath "/dev")))'
+                f'(deny file-write* (require-not (subpath "{temp_dir}"))'
+                '(require-not (subpath "/dev")))'
             )
             command = [
                 "sandbox-exec",
@@ -238,7 +267,10 @@ def _run_native_os(
             else:
                 return {
                     "status": "error",
-                    "error": "No native OS sandboxing tool (sandbox-exec / firejail) detected.",
+                    "error": (
+                        "No native OS sandboxing tool "
+                        "(sandbox-exec / firejail) detected."
+                    ),
                 }
 
         start_time = time.time()
@@ -249,6 +281,7 @@ def _run_native_os(
             stderr=subprocess.PIPE,
             text=True,
             timeout=10.0,
+            check=False,
         )
         duration = time.time() - start_time
 
@@ -260,7 +293,7 @@ def _run_native_os(
             "duration": duration,
             "mode_used": "native",
         }
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         return {"status": "error", "error": str(e)}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -291,9 +324,13 @@ def _run_local_host(
                 "error": f"Unsupported runtime: {language}",
             }
 
-        with open(os.path.join(temp_dir, target_filename), "w") as f:
+        with open(
+            os.path.join(temp_dir, target_filename), "w", encoding="utf-8"
+        ) as f:
             f.write(code_content)
-        with open(os.path.join(temp_dir, payload_filename), "w") as f:
+        with open(
+            os.path.join(temp_dir, payload_filename), "w", encoding="utf-8"
+        ) as f:
             f.write(payload_content)
 
         start_time = time.time()
@@ -304,6 +341,7 @@ def _run_local_host(
             stderr=subprocess.PIPE,
             text=True,
             timeout=10.0,
+            check=False,
         )
         duration = time.time() - start_time
 
@@ -315,7 +353,7 @@ def _run_local_host(
             "duration": duration,
             "mode_used": "local",
         }
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         return {"status": "error", "error": str(e)}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

@@ -33,13 +33,12 @@ rm -rf "$BUILD_TMP"
 echo "📦 Staging required source code files into $BUILD_TMP..."
 mkdir -p "$BUILD_TMP"
 cp "$REPO_ROOT/Dockerfile" "$REPO_ROOT/pyproject.toml" "$REPO_ROOT/README.md" "$REPO_ROOT/entrypoint.sh" "$REPO_ROOT/uv.lock" "$REPO_ROOT/scan.py" "$BUILD_TMP/"
-#cp "$REPO_ROOT/Dockerfile" "$REPO_ROOT/pyproject.toml" "$REPO_ROOT/README.md" "$REPO_ROOT/entrypoint.sh" "$REPO_ROOT/scan.py" "$BUILD_TMP/"
 cp -r "$REPO_ROOT/app" "$BUILD_TMP/"
 
 echo "🚀 Submitting container build to Google Cloud Build..."
 gcloud builds submit --tag "$IMAGE_TAG" "$BUILD_TMP"
 
 echo "🧹 Cleaning up temporary build directory..."
-# rm -rf "$BUILD_TMP"
+rm -rf "$BUILD_TMP"
 
 echo "✓ Container image built and pushed successfully to: $IMAGE_TAG"

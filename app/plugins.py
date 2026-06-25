@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Defense-in-depth plugin: blocks tool calls outside the VulnCatcher allowlist."""
+"""Defense-in-depth plugin: blocks tool calls outside the VulnCatcher
+allowlist."""
 
 from typing import Any
 
@@ -42,9 +43,9 @@ ALLOWED_TOOLS = frozenset(
 class ScannerAllowlistPlugin(BasePlugin):
     """Blocks any tool whose name is not in the VulnCatcher allowlist.
 
-    Rationale: the agent is only configured with these tools today, but a future
-    refactor or sub-agent that picks up extra tools (built-ins, MCP, etc.) should
-    not silently widen the attack surface.
+    Rationale: the agent is only configured with these tools today, but a
+    future refactor or sub-agent that picks up extra tools (built-ins, MCP,
+    etc.) should not silently widen the attack surface.
     """
 
     def __init__(self) -> None:
@@ -56,6 +57,7 @@ class ScannerAllowlistPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> dict[str, Any] | None:
+        del tool_args, tool_context
         if tool.name not in ALLOWED_TOOLS:
             return {
                 "status": "blocked",

@@ -1,4 +1,21 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Result processing and reporting utilities."""
+
 import glob
+import importlib.metadata
 import json
 import os
 import re
@@ -8,10 +25,14 @@ import sys
 import time
 from pathlib import Path
 
+import google.auth
 import requests
 from app.cli.costs import calculate_session_token_costs
 from app.remediation import create_remediation_branch
 from app.tools import REPORTS_DIR
+from google import genai
+from google.cloud import storage
+from google.genai import types
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -33,7 +54,7 @@ def extract_findings_list(data):
                     b_str = match_array.group(1)
             parsed = json.loads(b_str)
             return extract_findings_list(parsed)
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError):
             return []
     if isinstance(data, list):
         res = []
@@ -82,17 +103,15 @@ def parse_github_remote():
             if part.endswith(".git"):
                 part = part[:-4]
             return part
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         pass
     return None
 
 
 def write_sarif_report(findings, filename):
-    import importlib.metadata
-
     try:
         ver = importlib.metadata.version("vulncatcher")
-    except Exception:
+    except importlib.metadata.PackageNotFoundError:
         ver = "1.4"
     sarif_data = {
         "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
@@ -103,7 +122,7 @@ def write_sarif_report(findings, filename):
                     "driver": {
                         "name": "Reference Harness",
                         "semanticVersion": ver,
-                        "informationUri": "https://github.com/GoogleCloudPlatform/cloud-solutions",
+                        "informationUri": "https://github.com/GoogleCloudPlatform/reference-harness",
                     }
                 },
                 "results": findings,
@@ -111,28 +130,42 @@ def write_sarif_report(findings, filename):
         ],
     }
     os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, "w") as f:
+    with open(filename, "w", encoding="utf-8") as f:
         json.dump(sarif_data, f, indent=2)
 
 
 def upload_to_gcs(
     local_file_path: str, bucket_name: str, destination_blob_name: str
 ):
-    from google.cloud import storage
-
     console = Console()
     try:
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(destination_blob_name)
+        if hasattr(blob, "content_type") and destination_blob_name.endswith(
+            ".json"
+        ):
+            blob.content_type = "application/json"
+        elif hasattr(blob, "content_type") and destination_blob_name.endswith(
+            ".md"
+        ):
+            blob.content_type = "text/markdown"
+        elif hasattr(blob, "content_type") and destination_blob_name.endswith(
+            ".log"
+        ):
+            blob.content_type = "text/plain"
+        base = os.path.basename(local_file_path)
         console.print(
-            f"[dim]  ⌛ Uploading {os.path.basename(local_file_path)} to gcs://{bucket_name}/{destination_blob_name}...[/]"
+            f"[dim]  ⌛ Uploading {base} to "
+            f"gcs://{bucket_name}/{destination_blob_name}...[/]"
         )
         blob.upload_from_filename(local_file_path)
         console.print(
-            f"[bold green]✓ Successfully uploaded to GCS:[/] [underline cyan]gcs://{bucket_name}/{destination_blob_name}[/]"
+            "[bold green]✓ Successfully uploaded to GCS:[/] "
+            f"[underline cyan]gcs://{bucket_name}/{destination_blob_name}[/]"
         )
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Catching Exception because GCS client errors vary
         console.print(f"[bold red]✗ GCS Upload Failed:[/] {str(e)}")
 
 
@@ -160,7 +193,7 @@ def compile_and_render_results(
 
     if os.path.exists(server_log_path):
         try:
-            with open(server_log_path, "r") as lf:
+            with open(server_log_path, "r", encoding="utf-8") as lf:
                 log_lines = lf.readlines()[-35:]
             error_details = ""
             for line in log_lines:
@@ -180,34 +213,46 @@ def compile_and_render_results(
                 console.print()
                 console.print(
                     Panel(
-                        f"[bold red]✗ Reference Harness ADK Server Runtime Exception Intercepted![/]\n\n"
-                        f"[bold yellow]GCP Vertex AI Exception Details:[/]\n{error_details}\n"
-                        f"[bold cyan]Actionable Resolution:[/] Please ensure your environment is pointed to your allowlisted project ID (e.g., run [underline]export GOOGLE_CLOUD_PROJECT=tarunsharma-default-58b99[/] in your terminal before scanning!).",
+                        "✗ Reference Harness ADK Server Runtime Exception "
+                        "Intercepted!\n\n"
+                        "[bold yellow]GCP Vertex AI Exception Details:[/]\n"
+                        f"{error_details}\n"
+                        "[bold cyan]Actionable Resolution:[/] Please ensure "
+                        "your environment is pointed to your allowlisted "
+                        "project ID.",
                         border_style="red",
                         title="[bold red]Server Runtime Exception[/]",
                     )
                 )
                 sys.exit(1)
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             pass
 
     stats = calculate_session_token_costs(batch_session_ids)
     financial_text = ""
     if stats:
+        src = stats["pricing_source"]
+        disc = stats["discount_label"]
+        p_in, p_out = stats["pro_in"], stats["pro_out"]
+        f_in, f_out = stats["flash_in"], stats["flash_out"]
+        tot = stats["total_cost"]
         financial_text = (
-            f"\n\n[bold cyan]💸 Audit Financial Summary (Source: {stats['pricing_source']}){stats['discount_label']}:[/]\n"
-            f"  • Pro Input Tokens:   {stats['pro_in']:,}  |  Pro Output Tokens:  {stats['pro_out']:,}\n"
-            f"  • Flash Input Tokens:  {stats['flash_in']:,}  |  Flash Output Tokens: {stats['flash_out']:,}\n"
-            f"  • [bold cyan]Total Scan Cost:[/] [bold green]${stats['total_cost']:.4f} USD[/]\n"
-            f"  [dim]* Disclaimer: Estimated public retail rates (USD). Enterprise custom discount commitments with Google Cloud are not applied.[/]"
+            "\n\n[bold cyan]💸 Audit Financial Summary "
+            f"(Source: {src}){disc}:[/]\n"
+            f"  • Pro Input Tokens:   {p_in:,}  |  Pro Output:  {p_out:,}\n"
+            f"  • Flash Input:  {f_in:,}  |  Flash Output: {f_out:,}\n"
+            f"  • [bold cyan]Total Cost:[/] [bold green]${tot:.4f} USD[/]\n"
+            "  [dim]* Disclaimer: Estimated public retail rates (USD). "
+            "Enterprise custom discounts are not applied.[/]"
         )
 
     console.print()
     console.print(
         Panel(
-            f"[bold green]✔ Reference Harness Security Audit Completed Successfully![/]\n\n"
+            "✔ Reference Harness Security Audit Completed Successfully!\n\n"
             f"[dim]Total Duration:[/] {elapsed:.1f} seconds\n"
-            f"Your codebase has been thoroughly mapped, audited, and validated.{financial_text}",
+            "Your codebase has been thoroughly mapped, audited, and "
+            f"validated.{financial_text}",
             border_style="green",
             title="[bold green]Audit Complete[/]",
         )
@@ -222,15 +267,25 @@ def compile_and_render_results(
             start_time - 5.0
         ):
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     report_data = json.load(f)
                 batch_findings = extract_findings_list(report_data)
                 for find in batch_findings:
-                    fp = f"{find.get('ruleId')}@{find['locations'][0]['physicalLocation']['artifactLocation']['uri']}"
+                    rid = find.get("ruleId")
+                    uri = find["locations"][0]["physicalLocation"][
+                        "artifactLocation"
+                    ]["uri"]
+                    fp = f"{rid}@{uri}"
                     if fp not in processed_fingerprints:
                         processed_fingerprints.add(fp)
                         findings.append(find)
-            except Exception:
+            except (
+                OSError,
+                json.JSONDecodeError,
+                KeyError,
+                IndexError,
+                TypeError,
+            ):
                 pass
 
     if os.path.exists(db_path):
@@ -247,16 +302,20 @@ def compile_and_render_results(
                         for find in batch_findings:
                             if isinstance(find, dict) and "locations" in find:
                                 try:
-                                    fp = f"{find.get('ruleId')}@{find['locations'][0]['physicalLocation']['artifactLocation']['uri']}"
+                                    rid = find.get("ruleId")
+                                    uri = find["locations"][0][
+                                        "physicalLocation"
+                                    ]["artifactLocation"]["uri"]
+                                    fp = f"{rid}@{uri}"
                                     if fp not in processed_fingerprints:
                                         processed_fingerprints.add(fp)
                                         findings.append(find)
-                                except Exception:
+                                except (KeyError, IndexError, TypeError):
                                     pass
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError):
                         pass
             conn.close()
-        except Exception:
+        except sqlite3.Error:
             pass
 
     valid_patches = []
@@ -301,34 +360,45 @@ def compile_and_render_results(
                             ):
                                 if target_base.lower() in content.lower():
                                     raw_false_positives.append(content[:800])
-                    except Exception:
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        # Catching Exception because DB read errors vary
                         pass
 
                 try:
                     gemma_endpoint = os.environ.get(
                         "VULNCATCHER_GEMMA_ENDPOINT"
                     )
-                    prompt_text = f"""You are Reference Harness's Executive Reporting Agent.
-The security audit on target codebase '{os.path.basename(target_dir)}' has completed successfully with exactly 0 validated vulnerabilities.
-Write a professional, highly reassuring, and context-aware Executive Summary in plain English (around 2-3 paragraphs).
-Explain that Reference Harness mapped and audited the boundaries attack surface, found no active threats, and that the codebase maintains a secure-by-default posture against all scanned playbooks.
-Focus strictly on the target codebase '{os.path.basename(target_dir)}'. Do not mention external test fixtures (such as 'eval-fixtures' or 'NodeGoat') if they are not located inside the target codebase.
-Do not include markdown headings, lists, or code blocks. Write purely natural prose text."""
+                    t_base = os.path.basename(target_dir)
+                    prompt_text = (
+                        "You are Reference Harness Executive Reporter.\n"
+                        f"Security audit on codebase '{t_base}' completed\n"
+                        "successfully with exactly 0 validated findings.\n"
+                        "Write a reassuring Summary (2-3 paragraphs).\n"
+                        "Explain boundary attack surface was audited,\n"
+                        "found no active threats, codebase maintains posture.\n"
+                        f"Focus strictly on target codebase '{t_base}'.\n"
+                        "Do not mention fixtures unless in target codebase.\n"
+                        "No markdown headings or lists. Write prose."
+                    )
 
                     triage_prompt = ""
                     if raw_false_positives:
-                        triage_prompt = f"""You are Reference Harness's Senior AppSec Triage Critic.
-Based on these raw security discovery events from the database:
-{json.dumps(raw_false_positives[:8])}
-Back-reference only events that are relevant to the target codebase '{os.path.basename(target_dir)}'.
-
-Write an official, highly transparent, and structured "Noise Elimination & Triage Log" in Markdown.
-For each unique vulnerability fanned out in the raw events that was triaged/filtered out as a false positive or test noise, document:
-1. What was detected (vulnerability name/file path).
-2. Why we detected it (the theoretical threat model or signature shape).
-3. The exact human-style, objective reasoning for classifying it as noise or false positive (e.g., isolation inside the 'eval-fixtures' test directory, missing active endpoint reachability, etc.).
-Focus strictly on the target codebase '{os.path.basename(target_dir)}'. Do not mention external test fixtures (such as 'eval-fixtures' or 'NodeGoat') if they are not located inside the target codebase.
-Do not use general placeholders; analyze the raw event details factually and present them like a senior human auditor documenting their audit trail. Use a neat, clean markdown format."""
+                        raw_json = json.dumps(raw_false_positives[:8])
+                        triage_prompt = (
+                            "You are Reference Harness Triage Critic.\n"
+                            "Based on these raw events from DB:\n"
+                            f"{raw_json}\n"
+                            f"Reference only events for codebase '{t_base}'.\n"
+                            "\n"
+                            "Write a structured Triage Log in Markdown.\n"
+                            "For each vulnerability filtered as noise:\n"
+                            "1. What detected (vulnerability/file path).\n"
+                            "2. Why detected (theoretical threat model).\n"
+                            "3. Reasoning for classifying as noise.\n"
+                            f"Focus strictly on target codebase '{t_base}'.\n"
+                            "Do not mention fixtures unless in target.\n"
+                            "Analyze factually. Use clean markdown format."
+                        )
 
                     if gemma_endpoint:
                         url = (
@@ -369,10 +439,6 @@ Do not use general placeholders; analyze the raw event details factually and pre
                                     "message"
                                 ]["content"].strip()
                     else:
-                        import google.auth
-                        from google import genai
-                        from google.genai import types
-
                         api_key = os.environ.get("GEMINI_API_KEY")
                         if api_key:
                             client = genai.Client(
@@ -408,7 +474,15 @@ Do not use general placeholders; analyze the raw event details factually and pre
                                     temperature=0.2
                                 ),
                             )
-                        except Exception as exc:
+                        except (
+                            AttributeError,
+                            KeyError,
+                            OSError,
+                            RuntimeError,
+                            TypeError,
+                            ValueError,
+                        ) as exc:
+                            # Catching specific errors for client API
                             if "temperature" in str(exc).lower():
                                 response = client.models.generate_content(
                                     model=flash_model,
@@ -430,24 +504,48 @@ Do not use general placeholders; analyze the raw event details factually and pre
                                         ),
                                     )
                                 )
-                            except Exception as exc:
+                            except (
+                                AttributeError,
+                                KeyError,
+                                OSError,
+                                RuntimeError,
+                                TypeError,
+                                ValueError,
+                            ) as exc:
+                                # Catching specific errors for client API
                                 if "temperature" in str(exc).lower():
-                                    response_triage = client.models.generate_content(
-                                        model=flash_model,
-                                        contents=triage_prompt,
-                                        config=types.GenerateContentConfig(),
+                                    response_triage = (
+                                        client.models.generate_content(
+                                            model=flash_model,
+                                            contents=triage_prompt,
+                                            config=(
+                                                types.GenerateContentConfig()
+                                            ),
+                                        )
                                     )
                                 else:
                                     raise
                             triage_log = response_triage.text.strip()
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # Catching Exception because summary generation errors vary
                     pass
 
                 if not ai_summary:
-                    ai_summary = f"Reference Harness has completed a comprehensive application security scan of the target codebase '{os.path.basename(target_dir)}'. During this deep playbook audit, the scanning engine mapped, triaged, and validated all files across the codebase attack surface. No validated vulnerabilities, active secrets, or insecure configurations were discovered.\n\nThe codebase currently maintains a secure-by-default posture against all tested threat categories, and no immediate remediation actions are required."
+                    base = os.path.basename(target_dir)
+                    ai_summary = (
+                        "Reference Harness completed a security scan of "
+                        f"target codebase '{base}'. During playbook audit, "
+                        "the engine mapped, triaged, and validated all files. "
+                        "No validated vulnerabilities or secrets found.\n\n"
+                        "The codebase maintains a secure posture."
+                    )
 
                 if not triage_log:
-                    triage_log = "All discovered static and playbooks signatures were systematically validated. Any theoretical anomalies discovered inside test configurations, isolated directories, or unreferenced scripts were triaged, verified, and pruned as noise by the AI Triage Critic to ensure 100% validated attack surface accuracy."
+                    triage_log = (
+                        "All discovered signatures were validated. "
+                        "Theoretical anomalies in test configurations "
+                        "were triaged and pruned as noise."
+                    )
 
                 timestamp_str = time.strftime("%Y%m%d-%H%M%S")
                 os.makedirs(str(REPORTS_DIR), exist_ok=True)
@@ -455,7 +553,8 @@ Do not use general placeholders; analyze the raw event details factually and pre
                     clean_report_path = str(
                         REPORTS_DIR / f"vulncatcher-{timestamp_str}.md"
                     )
-                    report_body = f"""# Reference Harness report — {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+                    now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    report_body = f"""# Reference Harness report — {now_str}
 
 ## Executive summary
 
@@ -475,7 +574,7 @@ Do not use general placeholders; analyze the raw event details factually and pre
 
 No validated vulnerabilities were found in the production codebase.
 """
-                    with open(clean_report_path, "w") as f:
+                    with open(clean_report_path, "w", encoding="utf-8") as f:
                         f.write(report_body)
                     latest_md = clean_report_path
                 else:
@@ -487,27 +586,33 @@ No validated vulnerabilities were found in the production codebase.
                     )
                     write_sarif_report([], clean_sarif_path)
                     console.print(
-                        f"👉 [bold green]SARIF Report Generated:[/] [underline cyan]file://{clean_sarif_path}[/]"
+                        "[bold green]SARIF Report Generated:[/] "
+                        f"[underline cyan]file://{clean_sarif_path}[/]"
                     )
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Catching Exception because report writing errors vary
                 pass
 
         if latest_md and os.path.exists(latest_md):
             try:
-                with open(latest_md) as f:
+                with open(latest_md, encoding="utf-8") as f:
                     md_content = f.read()
                 parts = md_content.split("## Executive summary")
                 if len(parts) > 1:
                     summary_block = parts[1].split("##")[0].strip()
-                    summary_text = f"\n\n[bold yellow]💡 AI Audit Executive Summary:[/]\n{summary_block}"
-            except Exception:
+                    summary_text = (
+                        "\n\n[bold yellow]💡 AI Executive Summary:[/]\n"
+                        f"{summary_block}"
+                    )
+            except (OSError, UnicodeDecodeError):
                 pass
 
         console.print()
         console.print(
             Panel(
-                f"✔ [bold green]No security vulnerabilities were discovered in this target codebase![/]\n\n"
-                f"Your codebase is fully secure and compliant with our playbook rules.{summary_text}",
+                "✔ [bold green]No security vulnerabilities discovered![/]\n\n"
+                "Your codebase is fully secure and compliant with rules."
+                f"{summary_text}",
                 border_style="green",
                 title="[bold green]Audit Clean[/]",
             )
@@ -528,7 +633,7 @@ No validated vulnerabilities were found in the production codebase.
             )
 
             try:
-                with open(fresh_reports[-1], "r") as f:
+                with open(fresh_reports[-1], "r", encoding="utf-8") as f:
                     md_content = f.read()
                 match = re.search(
                     r"## Executive summary\s*\n*(.*?)\n*\s*##",
@@ -537,46 +642,51 @@ No validated vulnerabilities were found in the production codebase.
                 )
                 if match:
                     exec_summary = match.group(1).strip()
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 pass
 
             try:
-                with open(master_report_path, "w") as master:
-                    master.write(
-                        f"# Reference Harness Consolidated Master Audit Report\n\n"
+                with open(master_report_path, "w", encoding="utf-8") as master:
+                    title_str = (
+                        "# Reference Harness Consolidated "
+                        "Master Audit Report\n\n"
                     )
-                    master.write(
-                        f"Generated on: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-                    )
-                    master.write(
-                        f"Total Batches Consolidated: {len(fresh_reports)}\n\n"
-                    )
+                    master.write(title_str)
+                    now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    master.write(f"Generated on: {now_str}\n")
+                    master.write(f"Total Batches: {len(fresh_reports)}\n\n")
 
                     if exec_summary:
                         master.write(
                             f"## Executive Summary\n\n{exec_summary}\n\n"
                         )
 
-                    master.write(f"## Detailed Batch Findings\n\n")
+                    master.write("## Detailed Batch Findings\n\n")
                     for r_idx, r_path in enumerate(fresh_reports):
                         try:
-                            with open(r_path, "r") as f:
+                            with open(r_path, "r", encoding="utf-8") as f:
                                 content = f.read()
-                            content_clean = re.sub(r"^# .*?\n", "", content)
+                            clean = re.sub(r"^# .*?\n", "", content)
+                            base = os.path.basename(r_path)
                             master.write(
-                                f"### [Batch {r_idx+1}] Source Report: {os.path.basename(r_path)}\n"
+                                f"### [Batch {r_idx+1}] Report: {base}\n"
                             )
-                            master.write(f"{content_clean}\n\n---\n\n")
-                        except Exception:
+                            master.write(f"{clean}\n\n---\n\n")
+                        except (OSError, RuntimeError, ValueError):
+                            # Catching specific errors because file errors vary
                             pass
                 clickable_link = f"file://{master_report_path}"
                 if gcs_bucket:
                     gcs_prefix_clean = (
                         gcs_prefix.rstrip("/") + "/" if gcs_prefix else ""
                     )
-                    dest_blob = f"{gcs_prefix_clean}vulncatcher-master-{timestamp_str}.md"
+                    dest_blob = (
+                        f"{gcs_prefix_clean}vulncatcher-master-"
+                        f"{timestamp_str}.md"
+                    )
                     upload_to_gcs(master_report_path, gcs_bucket, dest_blob)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Catching Exception because report writing errors vary
                 latest_md = (
                     max(md_reports, key=os.path.getctime)
                     if md_reports
@@ -605,14 +715,18 @@ No validated vulnerabilities were found in the production codebase.
                 dest_blob = (
                     f"{gcs_prefix_clean}vulncatcher-master-{timestamp_str}.md"
                 )
-                gcs_info = f"\n\n☁  [bold green]Uploaded GCS Destination URL:[/]\n[bold underline cyan]gs://{gcs_bucket}/{dest_blob}[/]"
+                gcs_info = (
+                    "\n\n☁  [bold green]Uploaded GCS Destination URL:[/]\n"
+                    f"[bold underline cyan]gs://{gcs_bucket}/{dest_blob}"
+                    "[/]"
+                )
 
             console.print(
                 Panel(
-                    f"👉 [bold green]Clickable Master Markdown Report Link:[/]\n"
+                    "👉 [bold green]Clickable Master Markdown Link:[/]\n"
                     f"[bold underline cyan]{clickable_link}[/]"
                     f"{gcs_info}\n\n"
-                    "Cmd-click or double-click the link above to open the full consolidated audit report!",
+                    "Cmd-click or double-click link above to open report!",
                     border_style="cyan",
                     title="[bold cyan]Master Audit Report[/]",
                 )
@@ -623,7 +737,10 @@ No validated vulnerabilities were found in the production codebase.
                     Panel(
                         exec_summary,
                         border_style="cyan",
-                        title="[bold cyan]AI-Generated Audit Executive Summary[/]",
+                        title=(
+                            "[bold cyan]AI-Generated Audit Executive "
+                            "Summary[/]"
+                        ),
                     )
                 )
 
@@ -637,17 +754,23 @@ No validated vulnerabilities were found in the production codebase.
                 gcs_prefix_clean = (
                     gcs_prefix.rstrip("/") + "/" if gcs_prefix else ""
                 )
-                dest_blob = f"{gcs_prefix_clean}vulncatcher-master-{timestamp_str}.sarif"
+                dest_blob = (
+                    f"{gcs_prefix_clean}vulncatcher-master-"
+                    f"{timestamp_str}.sarif"
+                )
                 upload_to_gcs(master_sarif_path, gcs_bucket, dest_blob)
-                gcs_sarif_info = f"\n\n☁  [bold green]Uploaded GCS Destination URL:[/]\n[bold underline cyan]gs://{gcs_bucket}/{dest_blob}[/]"
+                gcs_sarif_info = (
+                    "\n\n☁  [bold green]Uploaded GCS Destination URL:[/]\n"
+                    f"[bold underline cyan]gs://{gcs_bucket}/{dest_blob}[/]"
+                )
             clickable_sarif_link = f"file://{master_sarif_path}"
             console.print()
             console.print(
                 Panel(
-                    f"👉 [bold green]Clickable Master SARIF Report Link:[/]\n"
+                    "👉 [bold green]Clickable Master SARIF Link:[/]\n"
                     f"[bold underline cyan]{clickable_sarif_link}[/]"
                     f"{gcs_sarif_info}\n\n"
-                    "Cmd-click or double-click the link above to open the full consolidated SARIF report!",
+                    "Cmd-click link above to open consolidated SARIF report!",
                     border_style="cyan",
                     title="[bold cyan]Master SARIF Report[/]",
                 )
@@ -655,7 +778,10 @@ No validated vulnerabilities were found in the production codebase.
 
     if findings:
         table = Table(
-            title="\n[bold cyan]Reference Harness Verified Security Findings Summary[/]",
+            title=(
+                "\n[bold cyan]Reference Harness Verified Security Findings "
+                "Summary[/]"
+            ),
             border_style="cyan",
         )
         table.add_column("Severity", style="bold red", justify="center")
@@ -682,22 +808,20 @@ No validated vulnerabilities were found in the production codebase.
             if props.get("validated"):
                 status = "Validated"
 
-            table.add_row(
-                severity,
-                f"{os.path.basename(file_uri)}:{line_num}",
-                rule_id,
-                status,
-            )
+            base = os.path.basename(file_uri)
+            table.add_row(severity, f"{base}:{line_num}", rule_id, status)
         console.print(table)
 
     if not valid_patches:
         console.print(
-            "\n[dim]No verified security patches available for this target.[/]"
+            "\n[dim]No verified patches available for this target.[/]"
         )
         sys.exit(0)
 
+    count_str = str(len(valid_patches))
     console.print(
-        f"\n[bold cyan]================ Verified Security Patches Available ({len(valid_patches)}) ================[/]"
+        "\n[bold cyan]================ Verified Security Patches "
+        f"Available ({count_str}) =================[/]"
     )
 
     for idx, f in enumerate(valid_patches):
@@ -708,18 +832,22 @@ No validated vulnerabilities were found in the production codebase.
         rule_id = f["ruleId"]
         diff = f["properties"]["patch_diff"]
 
+        base = os.path.basename(file_uri)
         console.print(
-            f"\n[bold cyan]Proposed Security Patch {idx+1}/{len(valid_patches)}:[/] [dim](CWE-ID: {rule_id} in {os.path.basename(file_uri)}:{line_num})[/]"
+            f"\n[bold cyan]Proposed Security Patch {idx+1}/{count_str}:[/] "
+            f"[dim](CWE-ID: {rule_id} in {base}:{line_num})[/]"
         )
         syntax = Syntax(diff, "diff", theme="ansi_dark")
         console.print(Panel(syntax, border_style="cyan"))
 
     console.print(
-        f"\n[bold green]⚡ Security Diffs verified & sandbox tested! Check-review completed.[/]"
+        "\n[bold green]⚡ Security Diffs verified & sandbox tested! "
+        "Check-review completed.[/]"
     )
 
     choices = console.input(
-        "\n[bold green]⚡ Enter the numbers of the patches you want to apply (comma-separated, e.g. '1, 2'), or press Enter to skip: [/]"
+        "\n[bold green]⚡ Enter numbers of patches to apply "
+        "(comma-separated, e.g. '1, 2'), or Enter to skip: [/]"
     )
 
     ansi_escape = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\(B")
@@ -750,14 +878,11 @@ No validated vulnerabilities were found in the production codebase.
     applied_count = 0
     while True:
         console.print(
-            "\n[bold green]⚡ How would you like Reference Harness to apply these patches?[/]"
+            "\n[bold green]⚡ How would you like Reference Harness "
+            "to apply these patches?[/]"
         )
-        console.print(
-            "  [1] 🚀 Submit a Pull Request (Generate GitHub one-click PR comparison link)"
-        )
-        console.print(
-            "  [2] 💻 Apply as a local Git Feature Branch (commits to a new local branch)"
-        )
+        console.print("  [1] 🚀 Submit PR (Generate GitHub PR comparison link)")
+        console.print("  [2] 💻 Apply local Git Branch (commits to new branch)")
         console.print("  [3] 📄 Discard and exit")
 
         opt = (
@@ -792,34 +917,36 @@ No validated vulnerabilities were found in the production codebase.
 
             branch_name = f"reference-harness-fix-{rule_id}-{int(time.time())}"
 
-            console.print(
-                f"\n[bold yellow]↻ Applying patch to {os.path.basename(file_path)}...[/]"
-            )
+            base = os.path.basename(file_path)
+            console.print(f"\n[bold yellow]↻ Applying patch to {base}...[/]")
             res = create_remediation_branch(file_path, diff, branch_name)
 
             if res["status"] == "success":
                 applied_count += 1
                 console.print(
-                    f"[bold green]✓ Patched successfully on branch {branch_name}![/]"
+                    f"[bold green]✓ Patched on branch {branch_name}![/]"
                 )
 
                 if opt == "1":
                     console.print(
-                        f"[bold yellow]↻ Pushing branch {branch_name} to GitHub...[/]"
+                        f"[bold yellow]↻ Pushing branch {branch_name}...[/]"
                     )
                     push_res = subprocess.run(
                         ["git", "push", "origin", branch_name],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
+                        check=False,
                     )
 
                     if push_res.returncode != 0:
+                        err = push_res.stderr.strip()
                         console.print(
-                            f"\n[bold red]✗ Git remote push failed: {push_res.stderr.strip()}[/]"
+                            f"\n[bold red]✗ Git remote push failed: {err}[/]"
                         )
                         console.print(
-                            "[bold yellow]Automatic GitHub push is blocked. Re-routing back to options board...[/]"
+                            "[bold yellow]Automatic GitHub push is blocked. "
+                            "Re-routing back to options board...[/]"
                         )
                         success = False
 
@@ -827,34 +954,40 @@ No validated vulnerabilities were found in the production codebase.
                             ["git", "checkout", "-"],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
+                            check=False,
                         )
                         subprocess.run(
                             ["git", "branch", "-D", branch_name],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
+                            check=False,
                         )
                         break
 
                     repo_path = parse_github_remote()
                     if repo_path:
-                        pr_url = f"[https://github.com/](https://github.com/){repo_path}/compare/main...{branch_name}?expand=1"
+                        pr_url = (
+                            "https://github.com/"
+                            f"{repo_path}/compare/main...{branch_name}?expand=1"
+                        )
                         console.print(
                             Panel(
-                                f"🚀 [bold green]One-Click GitHub PR Link is Ready![/]\n\n"
+                                "🚀 [bold green]One-Click PR Ready![/]\n\n"
                                 f"[bold underline cyan]{pr_url}[/]\n\n"
-                                "Click the URL above to review and finalize your Pull Request on GitHub!",
+                                "Click URL above to finalize your PR!",
                                 border_style="green",
                                 title="[bold green]Submit Pull Request[/]",
                             )
                         )
                     else:
                         console.print(
-                            f"[bold yellow]⚠️ GitHub push succeeded, but local Git remote is not hosted on GitHub. PR link skipped.[/]"
+                            "[bold yellow]⚠️ GitHub push succeeded, but "
+                            "local Git remote is not hosted on GitHub.[/]"
                         )
             else:
-                console.print(
-                    f"[bold red]✗ Failed to patch {os.path.basename(file_path)}: {res.get('error')}[/]"
-                )
+                base = os.path.basename(file_path)
+                err = res.get("error")
+                console.print(f"[bold red]✗ Failed to patch {base}: {err}[/]")
                 success = False
                 break
 
@@ -864,13 +997,16 @@ No validated vulnerabilities were found in the production codebase.
     if applied_count > 0:
         run_followup = (
             console.input(
-                "\n[bold green]? Would you like Reference Harness to automatically execute a follow-up scan to verify the fix? (y/n, default: n): [/]"
+                "\n[bold green]? Would you like Reference Harness to "
+                "execute a follow-up scan? (y/n, default: n): [/]"
             )
             .strip()
             .lower()
         )
         if run_followup == "y":
             console.print(
-                "\n[bold yellow]↻ Re-initiating follow-up validation scan sweep...[/]"
+                "\n[bold yellow]↻ Re-initiating follow-up validation...[/]"
             )
-            subprocess.run([sys.executable, sys.argv[0], target_dir])
+            subprocess.run(
+                [sys.executable, sys.argv[0], target_dir], check=False
+            )

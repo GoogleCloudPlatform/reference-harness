@@ -1,3 +1,19 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""ADK background server management CLI."""
+
 import os
 import re
 import socket
@@ -10,6 +26,8 @@ from rich.console import Console
 
 
 class ADKServerManager:
+    """Manages ADK server lifecycle."""
+
     def __init__(self):
         self.active_server_process = None
         self.active_server_port = 18080
@@ -24,6 +42,7 @@ class ADKServerManager:
                 shell=True,
                 stdout=subprocess.PIPE,
                 text=True,
+                check=False,
             )
             pids = port_proc.stdout.strip().split()
 
@@ -35,8 +54,9 @@ class ADKServerManager:
                         ["kill", "-9", pid],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
+                        check=False,
                     )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             pass
 
     def start_adk_server(self, env_map):
@@ -47,15 +67,16 @@ class ADKServerManager:
 
         for attempt in range(3):
             self.console.print(
-                f"[bold yellow]↻ Spinning up local background ADK server (Attempt {attempt+1}/3)...[/]"
+                "[bold yellow]↻ Spinning up local background ADK server "
+                f"(Attempt {attempt+1}/3)...[/]"
             )
             self.force_kill_port(18080)
             if self.active_server_port != 18080:
                 self.force_kill_port(self.active_server_port)
             time.sleep(1.5)
 
-            # Open in write mode ("w") to truncate any historical logs so we only parse the current run's port
-            boot_log = open(log_path, "w")
+            # Open in write mode ("w") to truncate historical logs
+            boot_log = open(log_path, "w", encoding="utf-8")
             boot_log.write(f"\n--- ADK Server Boot Attempt {attempt+1} ---\n")
             boot_log.flush()
 
@@ -92,15 +113,13 @@ class ADKServerManager:
             self.active_server_process = server_proc
 
             allocated_port = None
-            for _ in range(
-                240
-            ):  # Increased from 60 to 240 (60 seconds maximum timeout under QEMU/emulation)
+            for _ in range(240):  # 60s max timeout under QEMU/emulation
                 time.sleep(0.25)
                 if server_proc.poll() is not None:
                     break
                 if os.path.exists(log_path):
                     try:
-                        with open(log_path, "r") as lf:
+                        with open(log_path, "r", encoding="utf-8") as lf:
                             content = lf.read()
                         if (
                             "started on port" in content
@@ -112,72 +131,75 @@ class ADKServerManager:
                             if match:
                                 allocated_port = int(match.group(1))
                                 break
-                    except Exception:
+                    except (OSError, UnicodeDecodeError):
                         pass
 
             boot_log.close()
 
             if allocated_port:
-                # Perform a TCP socket ping to verify the port is open and listening
+                # Perform TCP socket ping to verify port is open
                 port_ready = False
-                for _ in range(
-                    100
-                ):  # Increased from 40 to 100 (10 seconds maximum timeout)
+                for _ in range(100):  # 10s max timeout
                     try:
                         with socket.create_connection(
                             ("127.0.0.1", allocated_port), timeout=0.5
                         ):
                             port_ready = True
                             break
-                    except Exception:
+                    except OSError:
                         pass
                     time.sleep(0.1)
 
                 if port_ready:
                     self.active_server_port = allocated_port
                     self.console.print(
-                        f"[bold green]✓ Server loaded successfully on port {allocated_port}![/]"
+                        "[bold green]✓ Server loaded successfully on port "
+                        f"{allocated_port}![/]"
                     )
                     return allocated_port
 
-            # Attempt failed: Clean up this specific process handle before retrying!
+            # Attempt failed: Clean up process handle before retrying
             try:
                 server_proc.terminate()
                 server_proc.wait(timeout=2)
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 try:
                     server_proc.kill()
-                except Exception:
+                except (OSError, subprocess.SubprocessError):
                     pass
             self.active_server_process = None
 
             self.console.print(
-                "[bold red]⚠ Uvicorn terminated prematurely or failed to bind. Retrying in 2 seconds...[/]"
+                "[bold red]⚠ Uvicorn terminated prematurely or failed to "
+                "bind. Retrying in 2 seconds...[/]"
             )
             if os.path.exists(log_path):
                 try:
-                    with open(log_path, "r") as lf:
+                    with open(log_path, "r", encoding="utf-8") as lf:
                         boot_logs = lf.read()
                     self.console.print(
-                        f"[dim]----- Uvicorn Boot Logs (Attempt {attempt+1}) -----\n{boot_logs}--------------------------------------------[/]"
+                        "[dim]----- Uvicorn Boot Logs "
+                        f"(Attempt {attempt+1}) -----\n{boot_logs}"
+                        "--------------------------------------------[/]"
                     )
-                except Exception as le:
+                except (OSError, UnicodeDecodeError) as le:
                     self.console.print(f"[dim]Failed to read boot log: {le}[/]")
             time.sleep(2.0)
 
-        raise Exception(
+        raise RuntimeError(
             "Fatal: Failed to start background ADK server after 3 attempts."
         )
 
     def stop_adk_server(self, env_map=None):
+        del env_map
         if self.active_server_process:
             try:
                 self.active_server_process.terminate()
                 self.active_server_process.wait(timeout=3)
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 try:
                     self.active_server_process.kill()
-                except Exception:
+                except (OSError, subprocess.SubprocessError):
                     pass
         self.force_kill_port(self.active_server_port)
         time.sleep(2.0)

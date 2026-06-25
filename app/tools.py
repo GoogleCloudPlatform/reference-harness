@@ -13,8 +13,8 @@
 # limitations under the License.
 """Tools exposed to the VulnCatcher sub-agents.
 
-V0 walking skeleton: Semgrep is real; Trivy/Gitleaks/Bandit are stubs that return
-empty findings so the pipeline shape is exercised end-to-end.
+V0 walking skeleton: Semgrep is real; Trivy/Gitleaks/Bandit are stubs that
+return empty findings so the pipeline shape is exercised end-to-end.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 try:
@@ -167,7 +168,10 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 
 
 def _parse_skill_frontmatter(text: str) -> dict:
-    """Parse a tiny YAML-ish frontmatter block. Supports name/description/when_to_apply/file_globs."""
+    """Parse a tiny YAML frontmatter block.
+
+    Supports name/description/when_to_apply/file_globs.
+    """
     if not text.startswith("---\n"):
         return {}
     end = text.find("\n---\n", 4)
@@ -183,9 +187,10 @@ def _parse_skill_frontmatter(text: str) -> dict:
 
 
 def _build_skill_index(category: str) -> str:
-    """Build a human-readable skill index for injection into an agent's instruction.
+    """Build a skill index for injection into an agent's instruction.
 
-    Returns one line per skill: `- {skill_id}: {description}`. Reads frontmatter only.
+    Returns one line per skill: `- {skill_id}: {description}`.
+    Reads frontmatter only.
     """
     cat_dir = SKILLS_DIR / category
     if not cat_dir.is_dir():
@@ -236,10 +241,10 @@ def detect_languages(target_path: str) -> dict:
     """Detect probable languages in a target codebase via manifest heuristics.
 
     Args:
-        target_path: Absolute or working-dir-relative path to the codebase root.
+        target_path: Absolute or relative path to the codebase root.
 
     Returns:
-        dict with 'status' and 'languages' (sorted list of language identifiers).
+        dict with 'status' and 'languages' (sorted list of identifiers).
     """
     p = Path(target_path)
     if not p.is_dir():
@@ -260,7 +265,7 @@ def detect_languages(target_path: str) -> dict:
         "Package.swift": "swift",
     }
     found: set[str] = set()
-    for root_dir, dirs, files in os.walk(p):
+    for _, dirs, files in os.walk(p):
         dirs[:] = [d for d in dirs if d not in EXPLORATION_SKIP_DIRS]
         for fname in files:
             if fname in manifests:
@@ -280,7 +285,7 @@ def run_semgrep(target_path: str) -> dict:
         target_path: Path to the codebase root to scan.
 
     Returns:
-        dict with 'status', 'count', and 'findings' (list of normalized findings).
+        dict with 'status', 'count', and 'findings'.
     """
     abs_target = os.path.abspath(target_path)
     cache_key = ("semgrep", abs_target)
@@ -357,7 +362,7 @@ def run_semgrep(target_path: str) -> dict:
 
 
 def run_trivy(target_path: str) -> dict:
-    """Run Trivy filesystem scan: vulnerable deps (CVEs) + secrets + IaC misconfig.
+    """Run Trivy fs scan: vulnerable deps (CVEs) + secrets + IaC misconfig.
 
     Trivy downloads its vulnerability database from ghcr.io on first run and
     caches it under ~/.cache/trivy. Subsequent runs reuse the cache. This is
@@ -416,9 +421,10 @@ def run_trivy(target_path: str) -> dict:
         for v in res.get("Vulnerabilities", []) or []:
             sev_str = str(v.get("Severity") or "info").lower()
             level = TRIVY_SEVERITY_MAP.get(sev_str, "note")
+            vid = v.get("VulnerabilityID", "unknown")
             findings.append(
                 {
-                    "ruleId": f"trivy.vuln.{v.get('VulnerabilityID', 'unknown')}",
+                    "ruleId": f"trivy.vuln.{vid}",
                     "level": level,
                     "message": {
                         "text": (v.get("Title") or v.get("Description") or "")[
@@ -445,9 +451,10 @@ def run_trivy(target_path: str) -> dict:
         for s in res.get("Secrets", []) or []:
             sev_str = str(s.get("Severity") or "high").lower()
             level = TRIVY_SEVERITY_MAP.get(sev_str, "error")
+            sid = s.get("RuleID", "unknown")
             findings.append(
                 {
-                    "ruleId": f"trivy.secret.{s.get('RuleID', 'unknown')}",
+                    "ruleId": f"trivy.secret.{sid}",
                     "level": level,
                     "message": {
                         "text": (s.get("Title") or s.get("Match", ""))[:500]
@@ -473,9 +480,10 @@ def run_trivy(target_path: str) -> dict:
             sev_str = str(m.get("Severity") or "info").lower()
             level = TRIVY_SEVERITY_MAP.get(sev_str, "note")
             cause = m.get("CauseMetadata") or {}
+            mid = m.get("ID", "unknown")
             findings.append(
                 {
-                    "ruleId": f"trivy.misconfig.{m.get('ID', 'unknown')}",
+                    "ruleId": f"trivy.misconfig.{mid}",
                     "level": level,
                     "message": {
                         "text": (m.get("Title") or m.get("Description", ""))[
@@ -525,13 +533,12 @@ def run_gitleaks(target_path: str) -> dict:
         target_path: Path to the codebase root to scan.
 
     Returns:
-        dict with 'status', 'count', and 'findings' (list of normalized findings).
+        dict with 'status', 'count', and 'findings'.
     """
     abs_target = os.path.abspath(target_path)
     cache_key = ("gitleaks", abs_target)
     if cache_key in _SCANNER_CACHE:
         return _SCANNER_CACHE[cache_key]
-    import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
         temp_report_path = tf.name
@@ -553,9 +560,10 @@ def run_gitleaks(target_path: str) -> dict:
         if result["status"] != "ran":
             return result
         if result["returncode"] not in (0, 1):
+            rc = result["returncode"]
             return {
                 "status": "error",
-                "error": f"gitleaks failed with exit code {result['returncode']}",
+                "error": f"gitleaks failed with exit code {rc}",
                 "stderr": result["stderr"][:500],
             }
 
@@ -565,35 +573,36 @@ def run_gitleaks(target_path: str) -> dict:
             and os.path.getsize(temp_report_path) > 0
         ):
             try:
-                with open(temp_report_path, "r") as rf:
+                with open(temp_report_path, "r", encoding="utf-8") as rf:
                     parsed = json.load(rf)
-            except Exception as e:
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
                 return {
                     "status": "parse_error",
                     "error": f"Failed to parse gitleaks JSON report: {e}",
                 }
         elif result.get("stdout"):
-            # Fallback for unit testing/mocking where output is returned in stdout
+            # Fallback for unit testing/mocking where output is returned
             try:
                 stdout_str = result["stdout"].strip()
                 parsed = json.loads(stdout_str) if stdout_str else []
-            except Exception as e:
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
                 return {
                     "status": "parse_error",
-                    "error": f"Failed to parse gitleaks JSON stdout fallback: {e}",
+                    "error": f"Failed to parse gitleaks fallback: {e}",
                 }
     finally:
         if os.path.exists(temp_report_path):
             try:
                 os.remove(temp_report_path)
-            except Exception:
+            except OSError:
                 pass
 
     findings = []
     for r in parsed:
+        rid = r.get("RuleID", "unknown")
         findings.append(
             {
-                "ruleId": f"gitleaks.secret.{r.get('RuleID', 'unknown')}",
+                "ruleId": f"gitleaks.secret.{rid}",
                 "level": "error",
                 "message": {
                     "text": r.get("Description", "Secret leaked")[:500]
@@ -631,7 +640,7 @@ def run_bandit(target_path: str) -> dict:
         target_path: Path to the codebase root to scan.
 
     Returns:
-        dict with 'status', 'count', and 'findings' (list of normalized findings).
+        dict with 'status', 'count', and 'findings'.
     """
     abs_target = os.path.abspath(target_path)
     cache_key = ("bandit", abs_target)
@@ -650,9 +659,10 @@ def run_bandit(target_path: str) -> dict:
     if result["status"] != "ran":
         return result
     if result["returncode"] not in (0, 1):
+        rc = result["returncode"]
         return {
             "status": "error",
-            "error": f"bandit failed with exit code {result['returncode']}",
+            "error": f"bandit failed with exit code {rc}",
             "stderr": result["stderr"][:500],
         }
 
@@ -679,9 +689,10 @@ def run_bandit(target_path: str) -> dict:
         cwe_id = r.get("issue_cwe", {}).get("id")
         cwe_field = [f"CWE-{cwe_id}"] if cwe_id else []
 
+        tid = r.get("test_id", "unknown")
         findings.append(
             {
-                "ruleId": f"bandit.sast.{r.get('test_id', 'unknown')}",
+                "ruleId": f"bandit.sast.{tid}",
                 "level": level,
                 "message": {"text": r.get("issue_text", "")[:500]},
                 "locations": [
@@ -711,19 +722,17 @@ def run_bandit(target_path: str) -> dict:
 
 
 def list_dir(target_path: str, max_depth: int = 2) -> dict:
-    """List files and directories under target_path, capped in depth and breadth.
+    """List files/dirs under target_path, capped in depth and breadth.
 
-    Skips common noise directories (.git, node_modules, __pycache__, virtualenvs).
-    Use this to get a structural overview of a codebase before deeper inspection.
+    Skips common noise directories (.git, node_modules, __pycache__, venvs).
+    Use this to get a structural overview before deeper inspection.
 
     Args:
         target_path: Directory to list.
-        max_depth: How many levels to descend (1 = just target_path's children).
+        max_depth: Levels to descend (1 = just target_path's children).
 
     Returns:
-        dict with 'status', 'root', 'truncated' (bool), and 'entries' (list of
-        objects with 'path' relative to root, 'type' = 'file'|'dir', and 'size'
-        for files).
+        dict with 'status', 'root', 'truncated' (bool), and 'entries'.
     """
     root = Path(target_path)
     if not root.is_dir():
@@ -780,7 +789,7 @@ def grep_code(
     Skips common noise directories. Caps results at 100 matches.
 
     Args:
-        pattern: Regex pattern (Python re syntax; ripgrep accepts most of it too).
+        pattern: Regex pattern (Python re syntax; ripgrep accepts most).
         target_path: Root directory to search.
         file_extensions: Optional list of extensions to restrict to, e.g.
             ["py", "js"]. Pass None to search all files.
@@ -811,7 +820,8 @@ def grep_code(
             args.extend(["--glob", f"!{skip}"])
         if file_extensions:
             for ext in file_extensions:
-                args.extend(["--glob", f"*.{ext.lstrip('.')}"])
+                clean_ext = ext.lstrip(".")
+                args.extend(["--glob", f"*.{clean_ext}"])
         args.extend([pattern, str(root)])
         try:
             proc = subprocess.run(
@@ -845,11 +855,9 @@ def grep_code(
             regex = re.compile(pattern)
         except re.error as e:
             return {"status": "error", "error": f"bad pattern: {e}"}
-        ext_set = (
-            {f".{e.lstrip('.')}" for e in file_extensions}
-            if file_extensions
-            else None
-        )
+        ext_set = None
+        if file_extensions:
+            ext_set = {"." + e.lstrip(".") for e in file_extensions}
         for path in root.rglob("*"):
             if truncated:
                 break
@@ -885,21 +893,18 @@ def grep_code(
 
 
 def load_skill(skill_id: str, category: str = "detection") -> dict:
-    """Load a vulnerability-detection skill from app/skills/<category>/<skill_id>.md.
+    """Load a vulnerability-detection skill from app/skills/<cat>/<id>.md.
 
-    Skills are progressively-disclosed playbooks: each one describes how to detect
-    a specific vulnerability class (CSRF, SSRF, IDOR, etc.) with the patterns to
-    grep for, files to inspect, true-positive criteria, and false-positive caveats.
-    Call this after consulting the skill index in your instruction to pull only
-    the skills you decide apply to the current codebase.
+    Skills are playbooks: each describes how to detect a vulnerability class
+    with patterns to grep for, files to inspect, and caveats.
+    Call this after consulting the index to pull applicable skills.
 
     Args:
-        skill_id: The skill identifier (filename without .md), e.g. 'csrf' or 'idor'.
-        category: Skill category subdirectory under app/skills/. Defaults to 'detection'.
+        skill_id: Identifier (filename without .md), e.g. 'csrf'.
+        category: Subdir under app/skills/. Defaults to 'detection'.
 
     Returns:
-        dict with 'status', 'skill_id', and 'content' (full Markdown body of the
-        skill, including frontmatter and procedure).
+        dict with 'status', 'skill_id', and 'content'.
     """
     safe_id = Path(skill_id).name
     if (
@@ -932,18 +937,18 @@ def find_references(
     target_path: str,
     file_extensions: list[str] | None = None,
 ) -> dict:
-    """Search for whole-word occurrences of a symbol (class, function, or variable) under target_path.
+    """Search for whole-word occurrences of a symbol under target_path.
 
     Uses ripgrep when available for speed; falls back to a Python re walk.
     Skips common noise directories. Caps results at 100 matches.
 
     Args:
-        symbol: The exact symbol name to search for (must consist of alphanumeric/underscores).
+        symbol: Exact symbol name (alphanumeric/underscores).
         target_path: Root directory to search.
-        file_extensions: Optional list of extensions to restrict to, e.g. ["py", "js"].
+        file_extensions: Optional list of extensions, e.g. ["py", "js"].
 
     Returns:
-        dict with 'status', 'count', 'truncated' (bool), and 'matches' (list of
+        dict with 'status', 'count', 'truncated' (bool), and 'matches'.
         objects with 'file', 'line', 'snippet').
     """
     if not symbol or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", symbol):
@@ -969,7 +974,7 @@ def read_code_window(file_path: str, start_line: int, end_line: int) -> dict:
     if not p.is_file():
         return {"status": "error", "error": f"not a file: {file_path}"}
     try:
-        lines = p.read_text(errors="replace").splitlines()
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
         return {"status": "error", "error": str(e)}
     snippet = "\n".join(lines[max(0, start_line - 1) : end_line])
@@ -987,29 +992,37 @@ def query_ast(
     query_string: str,
     language: str,
 ) -> dict:
-    """Execute a tree-sitter S-expression query against a source file's AST.
+    """Execute a tree-sitter S-expression query against AST.
 
-    Exposes structural code navigation to the agent. Supported languages: 'python', 'javascript', 'java', 'go', 'c', 'cpp'.
+    Exposes structural code navigation. Supported languages: 'python',
+    'javascript', 'java', 'go', 'c', 'cpp'.
 
     Args:
         file_path: Path to the source file to query.
-        query_string: S-expression query (e.g. '(function_definition name: (identifier) @name)').
-        language: Parser language ('python', 'javascript', 'java', 'go', 'c', or 'cpp').
+        query_string: S-expression query (e.g. '(function_definition ...)').
+        language: Parser language ('python', 'javascript', 'java', etc.).
 
     Returns:
-        dict with 'status', 'count', and 'matches' (list of objects with 'snippet', 'line', 'capture').
+        dict with 'status', 'count', and 'matches'.
     """
     if not HAS_TREE_SITTER:
         return {
             "status": "not_installed",
-            "error": "tree-sitter is not installed. Run 'uv pip install tree-sitter tree-sitter-python tree-sitter-javascript tree-sitter-java tree-sitter-go tree-sitter-c tree-sitter-cpp' first.",
+            "error": (
+                "tree-sitter not installed. Run 'uv pip install tree-sitter "
+                "tree-sitter-python tree-sitter-javascript tree-sitter-java "
+                "tree-sitter-go tree-sitter-c tree-sitter-cpp' first."
+            ),
         }
 
     lang_lower = str(language).lower()
     if lang_lower not in _TS_LANGUAGES:
         return {
             "status": "error",
-            "error": f"unsupported language: {language!r}. Supported: {list(_TS_LANGUAGES.keys())}",
+            "error": (
+                f"unsupported language: {language!r}. Supported: "
+                f"{list(_TS_LANGUAGES.keys())}"
+            ),
         }
 
     p = Path(file_path)
@@ -1027,7 +1040,8 @@ def query_ast(
 
     try:
         query = Query(lang, query_string)
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Catching Exception because TreeSitter query errors vary
         return {"status": "error", "error": f"invalid tree-sitter query: {e!s}"}
 
     cursor = QueryCursor(query)
@@ -1057,7 +1071,7 @@ def write_report(content: str, filename: str) -> dict:
 
     Args:
         content: Full Markdown body.
-        filename: Desired filename. Path components are stripped; .md added if missing.
+        filename: Desired filename. Path stripped; .md added if missing.
 
     Returns:
         dict with 'status', 'path' (absolute), and 'bytes' written.
@@ -1078,14 +1092,14 @@ def map_boundaries(
     custom_patterns: list[str] = None,
     custom_filenames: list[str] = None,
 ) -> dict:
-    """Dynamically analyze a codebase to harvest attack-surface entry points and system interface boundaries.
+    """Analyze a codebase to harvest attack-surface boundaries.
 
-    Supports both Web/Endpoint codebases and Systems/Non-Endpoint codebases natively.
+    Supports both Web/Endpoint and Systems/Non-Endpoint codebases natively.
 
     Args:
         target_path: Absolute path to the repository to analyze.
-        custom_patterns: Optional list of custom regex signatures generated dynamically by the agent.
-        custom_filenames: Optional list of custom filename keywords to match.
+        custom_patterns: Optional list of custom regex signatures.
+        custom_filenames: Optional list of custom filename keywords.
 
     Returns:
         dict with 'status', 'category', and 'boundary_files' list.
@@ -1165,9 +1179,9 @@ def map_boundaries(
     web_patterns_list = []
     web_filenames = set()
     sys_patterns_list = []
-    sys_filenames = set()
+    _ = set()
 
-    # Fallback registries for IaC config files (overridden dynamically from configuration registry!)
+    # Fallback registries for IaC config files
     iac_extensions = {".tf", ".tfvars", ".jsonnet"}
     iac_filenames = {
         "serverless.yml",
@@ -1179,7 +1193,7 @@ def map_boundaries(
 
     if os.path.exists(sig_path):
         try:
-            with open(sig_path) as f:
+            with open(sig_path, encoding="utf-8") as f:
                 sig_data = json.load(f)
 
             all_web_patterns = []
@@ -1200,26 +1214,26 @@ def map_boundaries(
                     all_iac_extensions.update(cat_data.get("extensions", []))
                     all_iac_filenames.update(cat_data.get("filenames", []))
                 else:
-                    # Polymorphic Resolution: Dynamically map any dynamic stacks (web, mobile, smart_contracts, etc.) into application boundary scopes!
+                    # Polymorphic Resolution: Map dynamic stacks to boundary
                     all_web_patterns.extend(cat_data.get("patterns", []))
                     all_web_filenames.update(cat_data.get("filenames", []))
 
             web_patterns_list = all_web_patterns
             web_filenames = all_web_filenames
             sys_patterns_list = all_sys_patterns
-            sys_filenames = all_sys_filenames
+            _ = all_sys_filenames
             iac_extensions = all_iac_extensions
             iac_filenames = all_iac_filenames
-        except Exception:
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
             pass
 
-    # Load bootstrapped signatures compiled dynamically by the AI Bootstrapper at startup
+    # Load bootstrapped signatures compiled by AI Bootstrapper at startup
     boot_path = str(
         Path(__file__).parent / ".adk" / "bootstrapped_signatures.json"
     )
     if os.path.exists(boot_path):
         try:
-            with open(boot_path) as f:
+            with open(boot_path, encoding="utf-8") as f:
                 boot_data = json.load(f)
                 boot_cat = boot_data.get("category")
                 if boot_data.get("patterns"):
@@ -1229,10 +1243,10 @@ def map_boundaries(
                         web_patterns_list = boot_data["patterns"]
                 if boot_data.get("filenames"):
                     if boot_cat == "systems":
-                        sys_filenames = set(boot_data["filenames"])
+                        _ = set(boot_data["filenames"])
                     else:
                         web_filenames = set(boot_data["filenames"])
-        except Exception:
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
             pass
 
     # Append dynamic custom entries passed by the agent
@@ -1284,19 +1298,19 @@ def map_boundaries(
                 web_matches += 1
                 continue
 
-            # 2. Check for Infrastructure-as-Code (IaC) config files dynamically
+            # 2. Check for IaC config files dynamically
             _, ext = os.path.splitext(file.lower())
             if ext in iac_extensions or file.lower() in iac_filenames:
                 boundary_files.append(file_path)
                 continue
 
-            # 2. Deep read to parse regex patterns — skip binary/asset files first
+            # 3. Deep read to parse regex patterns
             _, ext = os.path.splitext(file.lower())
             if ext in _SKIP_EXTENSIONS:
                 continue
             try:
-                # Read only first 400 lines to keep it performant and fast
-                with open(file_path, errors="ignore") as f:
+                # Read only first 400 lines
+                with open(file_path, encoding="utf-8", errors="ignore") as f:
                     head = "".join([f.readline() for _ in range(400)])
 
                 # Check for web controllers imports
@@ -1308,7 +1322,7 @@ def map_boundaries(
                 if sys_regex and sys_regex.search(head):
                     boundary_files.append(file_path)
                     sys_matches += 1
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 pass
 
     # Determine codebase category based on match majority

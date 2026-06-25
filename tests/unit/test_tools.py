@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Unit tests for security scanning tool wrappers."""
+
+# Disabling import-outside-toplevel because test mocks defer module loading
+# pylint: disable=import-outside-toplevel
+
 from pathlib import Path
 
 from app.tools import find_references
@@ -615,7 +620,7 @@ def test_execute_in_sandbox_local_python():
 
     from app.sandbox import execute_in_sandbox
 
-    # Mock local host execution mode to verify python subprocess execution safely
+    # Mock local host execution mode to verify python execution safely
     os.environ["VULNCATCHER_SANDBOX_MODE"] = "local"
     try:
         code = "def check():\n    return 'active'\n"
@@ -723,7 +728,7 @@ def test_execute_in_sandbox_auto_mock_mongoose():
 
     os.environ["VULNCATCHER_SANDBOX_MODE"] = "local"
     try:
-        # Replicates the exact dynamic stub written by the Validation Agent at runtime!
+        # Replicates dynamic stub written by Validation Agent at runtime!
         code = (
             "try {\n"
             "    const Module = require('module');\n"
@@ -732,7 +737,8 @@ def test_execute_in_sandbox_auto_mock_mongoose():
             "        if (name === 'mongoose') {\n"
             "            return {\n"
             "                connect: () => Promise.resolve(),\n"
-            "                model: () => ({ find: () => ({ exec: () => Promise.resolve([]) }) })\n"
+            "                model: () => ({ find: () => ({ exec: () => "
+            "Promise.resolve([]) }) })\n"
             "            };\n"
             "        }\n"
             "        return originalRequire.apply(this, arguments);\n"
@@ -747,7 +753,10 @@ def test_execute_in_sandbox_auto_mock_mongoose():
             "    });\n"
             "});\n"
         )
-        payload = "require('./target.js'); console.log('Mocking validation complete');\n"
+        payload = (
+            "require('./target.js'); "
+            "console.log('Mocking validation complete');\n"
+        )
 
         res = execute_in_sandbox(code, payload, "javascript")
 
@@ -774,7 +783,8 @@ def test_calculate_session_token_costs():
     conn = sqlite3.connect(db_path)
     conn.execute("DROP TABLE IF EXISTS events_test_temp;")
     conn.execute(
-        "CREATE TABLE events_test_temp (session_id TEXT, model_version TEXT, event_data TEXT);"
+        "CREATE TABLE events_test_temp ("
+        "session_id TEXT, model_version TEXT, event_data TEXT);"
     )
 
     mock_event_pro = {
@@ -848,7 +858,7 @@ def test_verify_model_configurations():
     # 3. Verify pricing registry has these model mappings configured
     prices_path = os.path.abspath("app/app_utils/default_prices.json")
     assert os.path.exists(prices_path)
-    with open(prices_path) as f:
+    with open(prices_path, encoding="utf-8") as f:
         prices = json.load(f)
 
     assert pro_model in prices["models"]

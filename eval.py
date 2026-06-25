@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Evaluation suite runner for Reference Harness."""
+
 import glob
 import json
 import os
@@ -25,10 +42,11 @@ def main():
         # If user just passed path, prepend --evalset automatically
         extra_args = ["--evalset", extra_args[0]] + extra_args[1:]
 
+    args_str = " ".join(extra_args)
     console.print(
         Panel.fit(
             "[bold green]VulnCatcher Evaluation Suite[/]\n"
-            f"[dim]Executing with parameters:[/] {' '.join(extra_args)}",
+            f"[dim]Executing with parameters:[/] {args_str}",
             border_style="green",
         )
     )
@@ -130,10 +148,12 @@ def main():
                         matched = True
 
                     if matched:
-                        # Close previous phase permanently above the active line
+                        # Close previous phase permanently above active line
                         prev_elapsed = time.time() - phase_start
+                        p_name = phases[active_index]["name"]
                         live.console.print(
-                            f"[bold green]✓[/] {phases[active_index]['name']} [dim]({prev_elapsed:.1f}s)[/]"
+                            f"[bold green]✓[/] {p_name} "
+                            f"[dim]({prev_elapsed:.1f}s)[/]"
                         )
 
                         # Transition to the new phase
@@ -153,10 +173,11 @@ def main():
                     )
                 )
 
-            # Complete the last active phase inside the Live block before exiting
+            # Complete last active phase inside Live block before exiting
             last_elapsed = time.time() - phase_start
+            p_name = phases[active_index]["name"]
             live.update(
-                f"[bold green]✓[/] {phases[active_index]['name']} [dim]({last_elapsed:.1f}s)[/]"
+                f"[bold green]✓[/] {p_name} [dim]({last_elapsed:.1f}s)[/]"
             )
 
         process.wait()
@@ -187,24 +208,27 @@ def main():
         if process.returncode != 0:
             console.print("\n[bold red]✗ Evaluation Failed[/]")
 
-            # Intercept and parse standard Vertex AI API gateway connection read timeouts!
+            # Intercept standard Vertex AI API gateway read timeouts!
             if (
                 "Read timed out" in stdout_content
                 or "ConnectionError" in stdout_content
                 or "TimeoutError" in stdout_content
             ):
+                msg = (
+                    "[bold red]✗ Connection Timeout Alert[/]\n\n"
+                    "Vertex AI gateway took >120s to respond under load.\n"
+                    "Previous evaluation results were cached in background.\n\n"
+                    "🚀 [bold cyan]Re-run command to resolve from cache![/]"
+                )
                 console.print(
                     Panel(
-                        "[bold red]✗ Connection Timeout Alert[/]\n\n"
-                        "The Vertex AI API gateway took longer than 120 seconds to respond under high capacity load.\n"
-                        "Your previous evaluation results have been fully cached in the background.\n\n"
-                        "🚀 [bold cyan]Simply re-run the evaluation command to resolve instantly from cache![/]",
+                        msg,
                         border_style="red",
                         title="[bold red]Vertex AI Timeout[/]",
                     )
                 )
             else:
-                # Otherwise filter out verbose Python stack tracebacks for clean logs
+                # Otherwise filter out Python tracebacks for clean logs
                 clean_err = []
                 for line in stdout_content.splitlines():
                     if any(
@@ -223,14 +247,15 @@ def main():
             sys.exit(process.returncode)
 
         console.print(
-            f"\n[bold green]✔ Evaluations Completed![/] [dim]({elapsed:.1f}s)[/]"
+            "\n[bold green]✔ Evaluations Completed![/] "
+            f"[dim]({elapsed:.1f}s)[/]"
         )
         console.print("\n" + "\n".join(clean_stdout))
 
         # Display premium custom scorecard dashboard
         show_scorecard_dashboard(console)
 
-    except Exception as e:
+    except (KeyboardInterrupt, OSError, RuntimeError, ValueError) as e:
         console.print(f"\n[bold red]✗ Error:[/] {e!s}")
         sys.exit(1)
 
@@ -244,7 +269,7 @@ def show_scorecard_dashboard(console):
     latest_file = max(files, key=os.path.getmtime)
 
     try:
-        with open(latest_file) as f:
+        with open(latest_file, encoding="utf-8") as f:
             data = json.load(f)
 
         case_result = data["eval_case_results"][0]
@@ -309,7 +334,14 @@ def show_scorecard_dashboard(console):
             )
         )
 
-    except Exception:
+    except (
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
         pass
 
 

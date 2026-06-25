@@ -1,16 +1,36 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Codebase bootstrapping utilities."""
+
 import glob
 import json
 import os
 import sys
 from pathlib import Path
 
+import google.auth
+import requests
+from google import genai
+from google.genai import types
 from rich.console import Console
 
 try:
     import litellm
 
     litellm.suppress_debug_info = True
-except Exception:
+except (ImportError, AttributeError):
     pass
 
 
@@ -28,19 +48,20 @@ def get_fallback_models():
         )
 
     try:
-        with open(local_prices_path) as f:
+        with open(local_prices_path, encoding="utf-8") as f:
             data = json.load(f)
             if "default_models" in data:
                 fallback_pro = data["default_models"].get("pro")
                 fallback_flash = data["default_models"].get("flash")
-    except Exception as err:
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as err:
         raise ValueError(
-            f"Failed to parse default_prices.json configuration registry: {str(err)}"
-        )
+            f"Failed to parse default_prices.json registry: {str(err)}"
+        ) from err
 
     if not fallback_pro or not fallback_flash:
         raise ValueError(
-            "Centralized default_prices.json registry is missing required 'default_models' definitions!"
+            "Centralized default_prices.json registry is missing required "
+            "'default_models' definitions!"
         )
 
     return fallback_pro, fallback_flash
@@ -82,17 +103,17 @@ def bootstrap_codebase_signatures(target_dir, flash_model=None):
                     for x in ["node_modules", ".venv", "dist", "build"]
                 ):
                     continue
-                with open(path, "r", errors="ignore") as f:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read(3000)
                 config_contents[os.path.relpath(path, target_dir)] = content
-            except Exception:
+            except (OSError, UnicodeError):
                 pass
 
     configs_desc = ""
     if not config_contents:
         unique_extensions = set()
         try:
-            for root, dirs, files in os.walk(target_dir):
+            for _, dirs, files in os.walk(target_dir):
                 dirs[:] = [
                     d
                     for d in dirs
@@ -125,11 +146,15 @@ def bootstrap_codebase_signatures(target_dir, flash_model=None):
                         ".txt",
                     ]:
                         unique_extensions.add(ext)
-        except Exception:
+        except OSError:
             pass
 
         if unique_extensions:
-            configs_desc = f"=== Codebase Extensions (No manifests found) ===\nCodebase contains these file extensions: {', '.join(sorted(unique_extensions))}\n\n"
+            ext_list = ", ".join(sorted(unique_extensions))
+            configs_desc = (
+                "=== Codebase Extensions (No manifests found) ===\n"
+                f"Codebase contains these file extensions: {ext_list}\n\n"
+            )
         else:
             return None
     else:
@@ -165,8 +190,6 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
 }}
 """
         if gemma_endpoint:
-            import requests
-
             url = gemma_endpoint.rstrip("/") + "/v1/chat/completions"
             payload = {
                 "model": flash_model,
@@ -179,22 +202,19 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                 url, json=payload, headers=headers, timeout=60.0
             )
             if not resp.ok:
-                raise Exception(
-                    f"Gemma endpoint classification failed (HTTP {resp.status_code}): {resp.text}"
+                raise RuntimeError(
+                    "Gemma classification failed "
+                    f"(HTTP {resp.status_code}): {resp.text}"
                 )
             res_text = resp.json()["choices"][0]["message"]["content"]
             res_data = json.loads(res_text.strip())
         else:
             if not flash_model.startswith("gemini-"):
-                import litellm
-
                 litellm_model = flash_model
                 if not litellm_model.startswith(
                     "vertex_ai/"
                 ) and not litellm_model.startswith("openai/"):
                     litellm_model = f"vertex_ai/{litellm_model}"
-
-                import google.auth
 
                 _, auth_project = google.auth.default()
                 project_id = (
@@ -207,7 +227,6 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                 os.environ["VERTEX_PROJECT"] = project_id
                 os.environ["VERTEX_LOCATION"] = location
 
-                # Configure temperature by default for reproducibility, fallback dynamically if unsupported
                 completion_kwargs = dict(
                     model=litellm_model,
                     messages=[{"role": "user", "content": prompt}],
@@ -217,7 +236,15 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                 )
                 try:
                     response = litellm.completion(**completion_kwargs)
-                except Exception as exc:
+                except (
+                    AttributeError,
+                    KeyError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    # Catching specific errors because LiteLLM errors vary
                     if (
                         "temperature" in str(exc).lower()
                         and "temperature" in completion_kwargs
@@ -229,10 +256,6 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                 res_text = response.choices[0].message.content
                 res_data = json.loads(res_text.strip())
             else:
-                import google.auth
-                from google import genai
-                from google.genai import types
-
                 api_key = os.environ.get("GEMINI_API_KEY")
                 if api_key:
                     old_adc = os.environ.pop(
@@ -272,7 +295,15 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                             temperature=0.0,
                         ),
                     )
-                except Exception as exc:
+                except (
+                    AttributeError,
+                    KeyError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    # Catching specific errors because client API errors vary
                     if "temperature" in str(exc).lower():
                         response = client.models.generate_content(
                             model=flash_model,
@@ -299,16 +330,22 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                 detected_cats.append(cat.upper())
 
         if len(detected_cats) > 1:
+            cat_list = ", ".join(sorted(detected_cats))
             console.print(
-                f"[bold green]✓ Codebase dynamically classified across multiple stacks: [underline cyan]{', '.join(sorted(detected_cats))}[/]![/]"
+                "✓ Codebase dynamically classified across multiple stacks: "
+                f"[underline cyan]{cat_list}[/]!"
             )
         elif detected_cats:
+            cat_0 = detected_cats[0]
             console.print(
-                f"[bold green]✓ Codebase dynamically classified stack: [underline cyan]{detected_cats[0]}[/]![/]"
+                "✓ Codebase dynamically classified stack: "
+                f"[underline cyan]{cat_0}[/]!"
             )
         else:
+            primary_up = primary_cat.upper()
             console.print(
-                f"[bold green]✓ Codebase primarily classified dynamically as [underline cyan]{primary_cat.upper()}[/]![/]"
+                "✓ Codebase primarily classified dynamically as "
+                f"[underline cyan]{primary_up}[/]!"
             )
 
         sig_path = str(
@@ -318,7 +355,7 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
         )
         if os.path.exists(sig_path):
             try:
-                with open(sig_path, "r") as sf:
+                with open(sig_path, "r", encoding="utf-8") as sf:
                     sig_data = json.load(sf)
 
                 for cat, cat_data in res_data.items():
@@ -350,14 +387,15 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
                         )
                         sig_data[cat]["extensions"] = updated
 
-                with open(sig_path, "w") as sf:
+                with open(sig_path, "w", encoding="utf-8") as sf:
                     json.dump(sig_data, sf, indent=2)
                 console.print(
-                    "[bold green]✓ Autogenous signatures registry dynamically enriched across all categories on disk![/]"
+                    "✓ Autogenous signatures registry dynamically enriched "
+                    "across all categories on disk!"
                 )
-            except Exception as se:
+            except (OSError, json.JSONDecodeError, TypeError) as se:
                 console.print(
-                    f"[bold yellow]⚠️ Signatures enrichment bypassed: {str(se)}[/]"
+                    f"[bold yellow]⚠️ Signatures enrichment bypassed: {se}[/]"
                 )
 
         boot_compatible_data = {
@@ -367,9 +405,11 @@ Return strictly a single JSON object with no prose, no markdown fences, containi
         }
         return boot_compatible_data
 
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Catching Exception because model classification errors vary
         console.print(f"[bold red]✗ AI Bootstrapper failed: {str(e)}[/]")
         console.print(
-            "[bold red]Stopping execution because the model is not available or failed to respond.[/]"
+            "Stopping execution because the model is not available "
+            "or failed to respond."
         )
         sys.exit(1)

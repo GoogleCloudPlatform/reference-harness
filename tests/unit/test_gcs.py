@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Unit tests for GCS uploading and CLI bucket verification."""
+
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
 from app.agent import _model, _model_fast
 from app.cli.bootstrap import bootstrap_codebase_signatures
+from app.cli.main import main
 from app.cli.results import upload_to_gcs
 
 
@@ -52,15 +56,22 @@ def test_upload_to_gcs_failure(tmp_path):
     bucket_name = "test-bucket"
     dest_blob = "scans/report.md"
 
+    mock_client_instance = MagicMock()
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+
+    mock_client_instance.bucket.return_value = mock_bucket
+    mock_bucket.blob.return_value = mock_blob
+    mock_blob.upload_from_filename.side_effect = Exception("Upload Failed")
+
     with patch(
-        "google.cloud.storage.Client",
-        side_effect=Exception("Connection Failed"),
+        "google.cloud.storage.Client", return_value=mock_client_instance
     ):
-        # Ensure it handles exceptions gracefully without crashing
-        upload_to_gcs(str(local_file), bucket_name, dest_blob)
+        with pytest.raises(Exception):
+            upload_to_gcs(str(local_file), bucket_name, dest_blob)
 
 
-def test_gemma_model_routing():
+def test_gemma_model_override():
     with patch.dict(
         os.environ,
         {
@@ -74,10 +85,13 @@ def test_gemma_model_routing():
 
         assert pro_llm.__class__.__name__ == "StrippedLiteLlm"
         assert pro_llm.model == "openai/google/gemma-4-E4B-it"
+        # pylint: disable=protected-access
+        # Accessing protected member _additional_args to test client config
         assert pro_llm._additional_args["api_base"] == "http://gemma-run.app"
 
         assert flash_llm.__class__.__name__ == "StrippedLiteLlm"
         assert flash_llm.model == "openai/google/gemma-4-E2B-it"
+        # pylint: disable=protected-access
         assert flash_llm._additional_args["api_base"] == "http://gemma-run.app"
 
 
@@ -88,14 +102,12 @@ def test_gemma_bootstrap_classification(tmp_path):
 
     mock_resp = MagicMock()
     mock_resp.ok = True
+    web_res = (
+        '{"primary_category": "web", "web": {"patterns": [], '
+        '"filenames": [], "extensions": [".js"]}}'
+    )
     mock_resp.json.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": '{"primary_category": "web", "web": {"patterns": [], "filenames": [], "extensions": [".js"]}}'
-                }
-            }
-        ]
+        "choices": [{"message": {"content": web_res}}]
     }
 
     with patch.dict(
@@ -113,10 +125,6 @@ def test_gemma_bootstrap_classification(tmp_path):
 
 
 def test_cli_bucket_verification_success():
-    import sys
-
-    from app.cli.main import main
-
     mock_args = MagicMock()
     mock_args.target_dir = "."
     mock_args.gcs_bucket = "valid-bucket"
@@ -133,7 +141,7 @@ def test_cli_bucket_verification_success():
     mock_bucket = MagicMock()
     mock_client.lookup_bucket.return_value = mock_bucket
 
-    # We patch argparse to return our mock_args, and patch other main components to return/exit early
+    # Patch argparse to return mock_args, and other components to exit early
     with patch(
         "argparse.ArgumentParser.parse_args", return_value=mock_args
     ), patch("google.cloud.storage.Client", return_value=mock_client), patch(
@@ -142,7 +150,7 @@ def test_cli_bucket_verification_success():
         "app.cli.main.bootstrap_codebase_signatures", return_value=None
     ), patch(
         "subprocess.run"
-    ) as mock_sub, patch(
+    ) as _, patch(
         "app.cli.main.map_boundaries", return_value={"boundary_files": []}
     ), patch(
         "app.cli.main.ADKServerManager"
@@ -154,19 +162,16 @@ def test_cli_bucket_verification_success():
         mock_server_mgr.return_value = mgr_inst
 
         # We patch requests.post inside main to fail immediately so main exits
-        with patch("requests.post", side_effect=Exception("stop")):
+        with patch("requests.post", side_effect=RuntimeError("stop")):
             try:
                 main()
-            except Exception as e:
+            except RuntimeError as e:
                 assert "stop" in str(e)
 
         mock_client.lookup_bucket.assert_called_once_with("valid-bucket")
 
 
 def test_cli_bucket_verification_missing():
-    import pytest
-    from app.cli.main import main
-
     mock_args = MagicMock()
     mock_args.target_dir = "."
     mock_args.gcs_bucket = "missing-bucket"

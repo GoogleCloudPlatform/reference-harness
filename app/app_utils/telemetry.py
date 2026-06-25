@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Telemetry setup utilities."""
+
 import logging
 import os
 
@@ -25,7 +27,8 @@ def setup_telemetry() -> str | None:
     )
     if bucket and capture_content != "false":
         logging.info(
-            "Prompt-response logging enabled - mode: NO_CONTENT (metadata only, no prompts/responses)"
+            "Prompt-response logging enabled - mode: NO_CONTENT "
+            "(metadata only, no prompts/responses)"
         )
         os.environ["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = (
             "NO_CONTENT"
@@ -51,7 +54,9 @@ def setup_telemetry() -> str | None:
         )
     else:
         logging.info(
-            "Prompt-response logging disabled (set LOGS_BUCKET_NAME=gs://your-bucket and OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT to enable)"
+            "Prompt-response logging disabled (set LOGS_BUCKET_NAME="
+            "gs://your-bucket and OTEL_INSTRUMENTATION_GENAI_CAPTURE_"
+            "MESSAGE_CONTENT=NO_CONTENT to enable)"
         )
 
     return bucket

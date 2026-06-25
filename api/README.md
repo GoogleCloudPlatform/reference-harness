@@ -9,8 +9,8 @@ To deploy the application, start by opening a CloudShell console in your desired
 GCP project. Then run the following commands:
 
 ```bash
-git clone https://github.com/cloud-gtm/reference-harness-ext.git
-cd reference-harness-ext/api
+git clone https://github.com/GoogleCloudPlatform/reference-harness.git
+cd projects/reference-harness/api
 
 npm install
 cp settings.jsonnet.example settings.jsonnet

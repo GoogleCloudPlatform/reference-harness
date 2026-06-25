@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Integration tests for Reference Harness agent streaming execution."""
+
+import os
+
 from app.agent import root_agent
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
@@ -34,20 +38,15 @@ def test_agent_stream() -> None:
         agent=root_agent, session_service=session_service, app_name="test"
     )
 
-    import os
-
     target_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "eval-fixtures",
         "demo-target",
     )
+    prompt_text = f"Scan {target_path} for vulnerabilities and write a report."
     message = types.Content(
         role="user",
-        parts=[
-            types.Part.from_text(
-                text=f"Scan {target_path} for vulnerabilities and write a report."
-            )
-        ],
+        parts=[types.Part.from_text(text=prompt_text)],
     )
 
     events = list(
