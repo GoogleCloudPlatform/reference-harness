@@ -863,3 +863,88 @@ def test_verify_model_configurations():
 
     assert pro_model in prices["models"]
     assert flash_model in prices["models"]
+
+
+def test_execute_in_sandbox_default_fail_closed(monkeypatch):
+    from unittest.mock import patch
+
+    from app.sandbox import execute_in_sandbox
+
+    monkeypatch.delenv("VULNCATCHER_SANDBOX_MODE", raising=False)
+    monkeypatch.delenv("VULNCATCHER_SANDBOX_FALLBACK", raising=False)
+
+    with (
+        patch(
+            "app.sandbox._run_docker",
+            return_value={"status": "error", "error": "docker not found"},
+        ) as mock_docker,
+        patch("app.sandbox._run_native_os") as mock_native,
+        patch("app.sandbox._run_local_host") as mock_local,
+    ):
+        res = execute_in_sandbox("code", "payload", "python")
+        assert res["status"] == "error"
+        assert "no isolation backend" in res["error"]
+        mock_docker.assert_called_once()
+        mock_native.assert_not_called()
+        mock_local.assert_not_called()
+
+
+def test_execute_in_sandbox_auto_never_falls_back_to_local(monkeypatch):
+    from unittest.mock import patch
+
+    from app.sandbox import execute_in_sandbox
+
+    monkeypatch.delenv("VULNCATCHER_SANDBOX_MODE", raising=False)
+    monkeypatch.setenv("VULNCATCHER_SANDBOX_FALLBACK", "auto")
+
+    with (
+        patch(
+            "app.sandbox._run_docker",
+            return_value={"status": "error", "error": "docker not found"},
+        ) as mock_docker,
+        patch(
+            "app.sandbox._run_native_os",
+            return_value={"status": "error", "error": "firejail not found"},
+        ) as mock_native,
+        patch("app.sandbox._run_local_host") as mock_local,
+    ):
+        res = execute_in_sandbox("code", "payload", "python")
+        assert res["status"] == "error"
+        assert "no isolation backend" in res["error"]
+        mock_docker.assert_called_once()
+        mock_native.assert_called_once()
+        mock_local.assert_not_called()
+
+
+def test_validation_agent_sandbox_tool_regression_no_backends(
+    monkeypatch, tmp_path
+):
+    from unittest.mock import patch
+
+    from app.agent import validation_agent
+
+    monkeypatch.delenv("VULNCATCHER_SANDBOX_MODE", raising=False)
+    monkeypatch.delenv("VULNCATCHER_SANDBOX_FALLBACK", raising=False)
+    monkeypatch.setattr("sys.platform", "linux")
+
+    sandbox_tool = next(
+        t
+        for t in validation_agent.tools
+        if getattr(t, "__name__", "") == "execute_in_sandbox"
+    )
+    canary_file = tmp_path / "canary.txt"
+    payload = f"open({str(canary_file)!r}, 'w').write('executed')\n"
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "docker":
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+        raise AssertionError(f"Unexpected subprocess execution: {cmd}")
+
+    with (
+        patch("app.sandbox.shutil.which", return_value=None),
+        patch("app.sandbox.subprocess.run", side_effect=fake_run),
+    ):
+        res = sandbox_tool("", payload, "python")
+        assert res["status"] == "error"
+        assert "no isolation backend" in res["error"]
+        assert not canary_file.exists()

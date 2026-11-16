@@ -19,10 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Install uv and google-agents-cli
+# Install uv and google-agents-cli into shared paths accessible by nonroot
+ENV UV_TOOL_BIN_DIR=/usr/local/bin \
+    UV_TOOL_DIR=/opt/uv-tools
 RUN pip install --no-cache-dir uv==0.8.13 && \
-    uv tool install "google-agents-cli>=0.2.0"
-ENV PATH="/root/.local/bin:${PATH}"
+    uv tool install "google-agents-cli>=0.2.0" && \
+    chmod -R a+rX /opt/uv-tools
 
 # Install Semgrep
 RUN pip install --no-cache-dir semgrep==1.168.0
@@ -44,12 +46,18 @@ RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/
 # hadolint ignore=DL3059
 RUN pip install --no-cache-dir bandit==1.9.4
 
+RUN groupadd --system --gid 10001 nonroot && \
+    useradd --system --uid 10001 --gid nonroot --create-home --home-dir /home/nonroot --shell /usr/sbin/nologin nonroot && \
+    mkdir -p /code && chown -R nonroot:nonroot /code
+
 WORKDIR /code
 
-COPY ./pyproject.toml ./README.md ./uv.lock* ./
-COPY ./app ./app
-COPY ./scan.py ./scan.py
-COPY ./entrypoint.sh ./entrypoint.sh
+COPY --chown=nonroot:nonroot ./pyproject.toml ./README.md ./uv.lock* ./
+COPY --chown=nonroot:nonroot ./app ./app
+COPY --chown=nonroot:nonroot ./scan.py ./scan.py
+COPY --chown=nonroot:nonroot ./entrypoint.sh ./entrypoint.sh
+
+USER nonroot
 
 ENV UV_DEFAULT_INDEX=https://pypi.org/simple
 ENV UV_INDEX_URL=https://pypi.org/simple

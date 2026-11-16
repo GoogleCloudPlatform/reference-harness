@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging and build artifacts
+build/
+dist/
+build_tmp/
+*.egg-info/
+.eggs/
+*.spec
+
+# Test and linter caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ADK & Reference Harness runtime state and reports
+.adk/
+app/.adk/
+.google-agents-cli/
+reports/
+*evalset_result.json
+
+# Node / API / Terraform artifacts
+node_modules/
+api/cloud_run_functions/zip_files/
+api/vulncatcher-api.sh
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# OS files
+.DS_Store

@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [1.7] - 2026-11-16
+
+### Security
+- **Fail-Closed Sandbox Isolation (`b/584415967`):**
+  - Changed the default `VULNCATCHER_SANDBOX_FALLBACK` policy in `app/sandbox.py` from `"auto"` to `"fail"` and removed `"local"` host subprocess execution from the automatic fallback cascade (`_run_with_mode`).
+  - When neither Docker nor a native OS sandbox (`sandbox-exec` / `firejail`) is available, `execute_in_sandbox` now fails closed with an explicit `"no isolation backend"` error instead of silently degrading to unsandboxed host execution.
+- **Validation Agent Prompt-Injection Guard:**
+  - Added an untrusted-data guard to `VALIDATION_INSTRUCTION` in `app/agent.py` instructing the agent to treat all scanned repository code, comments, and strings strictly as untrusted data and to downgrade findings to unvalidated (`validated: false`) when no sandbox isolation backend is available.
+- **Non-Root Container Execution:**
+  - Updated `Dockerfile` to provision a dedicated `nonroot` system user/group (`uid/gid 10001`), install `uv` tools into `/usr/local/bin` and `/opt/uv-tools`, set ownership of `/code`, and run the container under `USER nonroot`.
+
+### Added
+- **Repository `.gitignore` & Regression Unit Tests:**
+  - Added a comprehensive root `.gitignore` covering Python bytecode, virtual environments, test/linter caches, ADK runtime session databases, scan reports, and build/Terraform artifacts.
+  - Added unit tests (`test_execute_in_sandbox_default_fail_closed` and `test_execute_in_sandbox_auto_never_falls_back_to_local`) in `tests/unit/test_tools.py`.
+
 ## [1.6] - 2026-06-05
 
 ### Fixed
