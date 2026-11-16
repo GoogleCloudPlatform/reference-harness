@@ -32,7 +32,7 @@ def execute_in_sandbox(
 
     Environment Configurations:
         VULNCATCHER_SANDBOX_MODE: docker (default)|native|local|static
-        VULNCATCHER_SANDBOX_FALLBACK: "auto" (default) | "fail"
+        VULNCATCHER_SANDBOX_FALLBACK: "fail" (default) | "auto"
 
     Returns:
         dict with 'status', 'exit_code', 'stdout', 'stderr', 'duration',
@@ -43,7 +43,7 @@ def execute_in_sandbox(
     # Read user configurations from shell environment variables
     selected_mode = os.environ.get("VULNCATCHER_SANDBOX_MODE", "docker").lower()
     fallback_policy = os.environ.get(
-        "VULNCATCHER_SANDBOX_FALLBACK", "auto"
+        "VULNCATCHER_SANDBOX_FALLBACK", "fail"
     ).lower()
 
     supported_modes = ["docker", "native", "local", "static"]
@@ -71,15 +71,22 @@ def _run_with_mode(
     if mode == "static":
         return {
             "status": "skipped",
-            "reason": "Static-only checks; dynamic validation bypassed.",
+            "reason": "static-only checks; dynamic validation bypassed.",
             "mode_used": "static",
         }
 
     if mode == "docker":
         res = _run_docker(code_content, payload_content, language)
-        if res["status"] != "error" or fallback == "fail":
+        if res["status"] != "error":
             return res
-        # Fallback cascade
+        if fallback != "auto":
+            return {
+                "status": "error",
+                "error": (
+                    f"no isolation backend: {res.get('error', 'docker failed')}"
+                ),
+            }
+        # Fallback cascade limited strictly to isolated native OS sandboxing
         console.print(
             "[bold yellow]⚠️ Sandbox Warning:[/] Docker execution failed "
             "or is not installed. Cascading fallback to 'native' OS sandboxing."
@@ -90,19 +97,19 @@ def _run_with_mode(
 
     if mode == "native":
         res = _run_native_os(code_content, payload_content, language)
-        if res["status"] != "error" or fallback == "fail":
+        if res["status"] != "error":
             return res
-        # Fallback cascade
-        console.print(
-            "[bold yellow]⚠️ Sandbox Warning:[/] Native OS sandboxing failed. "
-            "Cascading fallback to 'local' host execution."
-        )
-        return _run_with_mode(
-            code_content, payload_content, language, "local", fallback, console
-        )
+        return {
+            "status": "error",
+            "error": (
+                "no isolation backend: "
+                f"{res.get('error', 'native OS sandbox unavailable')}"
+            ),
+        }
 
     if mode == "local":
-        # Print a highly visible warnings panel to alert developers
+        # Direct host execution is never part of any fallback cascade and
+        # only runs if explicitly configured via VULNCATCHER_SANDBOX_MODE=local.
         console.print(
             Panel(
                 "[bold red]⚠️ WARNING: DIRECT HOST EXECUTION[/]\n"
@@ -113,18 +120,7 @@ def _run_with_mode(
                 title="[bold red]Sandbox Isolation Alert[/]",
             )
         )
-        res = _run_local_host(code_content, payload_content, language)
-        if res["status"] != "error" or fallback == "fail":
-            return res
-
-        # Absolute bottom of the cascade: fallback to static
-        console.print(
-            "[bold red]✗ Sandbox Error:[/] Local execution failed. "
-            "Downgrading to 'static' triage."
-        )
-        return _run_with_mode(
-            code_content, payload_content, language, "static", fallback, console
-        )
+        return _run_local_host(code_content, payload_content, language)
 
     return {
         "status": "error",
